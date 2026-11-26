@@ -55,9 +55,17 @@ jobs:
           zip -qry "${{ steps.version.outputs.ipa }}" Payload
           shasum -a 256 "${{ steps.version.outputs.ipa }}"
 
+      # 先留 zip 兜底，再发 Release；发布失败也不会连兜底都没有。
+      - name: Upload IPA (zip artifact fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CarWithin-unsigned-ipa-zip
+          path: ${{ steps.version.outputs.ipa }}
+
       # GitHub 的 Actions Artifact 下载永远是 zip；Release 附件才能直接下载 .ipa。
       # 标记为预发布，应用内更新检查（releases/latest 与 isStable）不会把它当成正式版。
       - name: Publish prerelease with IPA
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -69,12 +77,7 @@ jobs:
             grep -E '^CarWithin-.*\.ipa$' |
             while read -r name; do gh release delete-asset ci-builds "$name" --yes; done || true
           gh release upload ci-builds "${{ steps.version.outputs.ipa }}" --clobber
-
-      - name: Upload IPA (zip artifact fallback)
-        uses: actions/upload-artifact@v4
-        with:
-          name: CarWithin-unsigned-ipa-zip
-          path: ${{ steps.version.outputs.ipa }}
+          gh release edit ci-builds --title "CI 构建 · ${{ steps.version.outputs.ipa }}"
 
       - name: Upload build log
         if: always()
