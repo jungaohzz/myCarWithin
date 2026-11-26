@@ -3,6 +3,9 @@ name: Build unsigned IPA
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15
@@ -15,6 +18,12 @@ jobs:
       - name: Protocol smoke tests (non-blocking)
         continue-on-error: true
         run: bash Tools/test_tailing.sh
+
+      - name: Version
+        id: version
+        run: |
+          short=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" App/Info.plist)
+          echo "ipa=CarWithin-${short}-b${{ github.run_number }}-unsigned.ipa" >> "$GITHUB_OUTPUT"
 
       - name: Build
         run: |
@@ -43,14 +52,29 @@ jobs:
         run: |
           mkdir -p Payload
           cp -R "build/Build/Products/Release-iphoneos/TDSCarKit.app" Payload/
-          zip -qry CarWithin-1.0.5-ios15-unsigned.ipa Payload
-          shasum -a 256 CarWithin-1.0.5-ios15-unsigned.ipa
+          zip -qry "${{ steps.version.outputs.ipa }}" Payload
+          shasum -a 256 "${{ steps.version.outputs.ipa }}"
 
-      - name: Upload IPA
+      # GitHub 的 Actions Artifact 下载永远是 zip；Release 附件才能直接下载 .ipa。
+      # 标记为预发布，应用内更新检查（releases/latest 与 isStable）不会把它当成正式版。
+      - name: Publish prerelease with IPA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view ci-builds >/dev/null 2>&1 ||
+            gh release create ci-builds --prerelease --target "$GITHUB_SHA" \
+              --title "CI 构建（非正式发布）" \
+              --notes "自动构建的未签名 IPA，仅用于自签安装和测试，不是正式版本。"
+          gh release view ci-builds --json assets --jq '.assets[].name' |
+            grep -E '^CarWithin-.*\.ipa$' |
+            while read -r name; do gh release delete-asset ci-builds "$name" --yes; done || true
+          gh release upload ci-builds "${{ steps.version.outputs.ipa }}" --clobber
+
+      - name: Upload IPA (zip artifact fallback)
         uses: actions/upload-artifact@v4
         with:
-          name: CarWithin-unsigned-ipa
-          path: CarWithin-1.0.5-ios15-unsigned.ipa
+          name: CarWithin-unsigned-ipa-zip
+          path: ${{ steps.version.outputs.ipa }}
 
       - name: Upload build log
         if: always()
