@@ -1210,20 +1210,25 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         // Merely revisiting the name field must not overwrite an edited password with Keychain.
         guard passwordLoadedForSSID != ssid else { return }
         passwordLoadedForSSID = ssid
+        var savedReadError: String?
         do {
             if let saved = try WiFiCredentials.password(for: ssid) {
                 passwordField.text = saved; openNetworkSwitch.isOn = saved.isEmpty
                 passwordStatus.text = "已读取保存的 Wi-Fi 配置"
                 return
             }
-        } catch { passwordStatus.text = "无法读取已保存的密码，请重新输入。" }
+        } catch { savedReadError = "无法读取已保存的密码（\(error.localizedDescription)），请重新输入。" }
         // TrollStore builds can read the password iOS saved when joining this network;
         // once found, keep a copy so it survives without the system keychain entitlement.
-        guard let system = SystemWiFiPassword.password(forSSID: ssid) else { return }
+        guard let system = SystemWiFiPassword.password(forSSID: ssid) else {
+            if let savedReadError { passwordStatus.text = savedReadError; alert("Wi-Fi 密码读取失败", savedReadError) }
+            return
+        }
         passwordField.text = system; openNetworkSwitch.isOn = system.isEmpty
-        passwordStatus.text = "已自动读取系统保存的 Wi-Fi 密码"
+        passwordStatus.text = savedReadError.map { system.isEmpty ? $0 : $0 + "已改用系统保存的密码。" }
+            ?? "已自动读取系统保存的 Wi-Fi 密码"
         do { try WiFiCredentials.save(system, for: ssid) } catch {
-            passwordStatus.text = "已自动读取系统保存的 Wi-Fi 密码（保存到本 App 失败）"
+            passwordStatus.text = "已自动读取系统保存的 Wi-Fi 密码（保存到本 App 失败：\(error.localizedDescription)）"
         }
     }
     private func refreshNetworkSummary() {
