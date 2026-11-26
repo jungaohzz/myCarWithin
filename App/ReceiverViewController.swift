@@ -135,6 +135,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let zeehoStatus = StatusLabel()
     private let zeehoAddressField = UITextField()
     private let zeehoAutomaticSwitch = UISwitch()
+    private let zeehoAE2FrameRateControl = ChoiceMenu(items: ["30 FPS", "60 FPS（实验）"])
+    private var selectedZeehoAE2FrameRate: Int { zeehoAE2FrameRateControl.selectedSegmentIndex == 1 ? 60 : 30 }
     private func updateZeehoStatus(_ message: String) {
         zeehoStatus.text = message
         zeehoCardStatus.text = message
@@ -779,9 +781,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         if outputMode == .zeehoAE2 {
             let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
-            // Same plan as the reference AE2 entry; the output stage re-scales to the panel size
-            // the instrument reports during media negotiation.
-            return DisplayPlan(width: 1024, height: 480, fps: 30, codec: .h264, iconWidthMM: icon)
+            // The reference treats 60 FPS as an experiment; 30 is its default. The output stage
+            // re-scales to the panel size the instrument reports during media negotiation.
+            return DisplayPlan(width: 1024, height: 480, fps: selectedZeehoAE2FrameRate, codec: .h264, iconWidthMM: icon)
         }
         if outputMode == .ninebot {
             let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
@@ -1078,6 +1080,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             config.zeehoAutomaticAddress = automatic
             config.zeehoAddress = automatic ? "" : (zeehoAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             config.zeehoIsAE2 = outputMode == .zeehoAE2
+            config.zeehoFrameRate = selectedZeehoAE2FrameRate
         }
         if outputMode == .ninebot {
             config.ninebotAddress = (ninebotAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1816,6 +1819,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         transportProbeButton.isEnabled = value
         headUnitOutput.isEnabled = value
         zeehoAutomaticSwitch.isEnabled = value
+        zeehoAE2FrameRateControl.isEnabled = value
         zeehoAddressField.isEnabled = value && !zeehoAutomaticSwitch.isOn
         ninebotAddressField.isEnabled = value
         tailingAddressField.isEnabled = value
@@ -2053,6 +2057,8 @@ extension ReceiverViewController {
         // The placeholder .1 is not every AE2 Pro hotspot's address, so scanning is the default.
         zeehoAutomaticSwitch.isOn = defaults.object(forKey: "zeehoAutomaticAddress") as? Bool ?? true
         zeehoAutomaticSwitch.addTarget(self, action: #selector(zeehoAutomaticChanged), for: .valueChanged)
+        zeehoAE2FrameRateControl.selectedSegmentIndex = (defaults.object(forKey: "zeehoAE2FrameRate") as? Int ?? 30) >= 60 ? 1 : 0
+        zeehoAE2FrameRateControl.addTarget(self, action: #selector(zeehoAE2FrameRateChanged), for: .valueChanged)
         ninebotAddressField.text = defaults.string(forKey: "ninebotAddress") ?? "192.168.1.1"
         ninebotAddressField.keyboardType = .decimalPad
         ninebotAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
@@ -2115,6 +2121,11 @@ extension ReceiverViewController {
         UserDefaults.standard.set(zeehoAutomaticSwitch.isOn, forKey: "zeehoAutomaticAddress")
         zeehoAddressField.isEnabled = !zeehoAutomaticSwitch.isOn && !running
         if !running { updateZeehoCardIdleStatus() }
+        reloadVisibleSettings()
+    }
+    @objc private func zeehoAE2FrameRateChanged() {
+        guard !running else { return }
+        UserDefaults.standard.set(selectedZeehoAE2FrameRate, forKey: "zeehoAE2FrameRate")
         reloadVisibleSettings()
     }
     private func updateZeehoCardIdleStatus() {
@@ -2378,9 +2389,9 @@ extension ReceiverViewController {
             }
             if outputMode == .zeehoAE2 {
                 return [
-                    SettingsSection("极核 AE2 5 寸", footer: "画面尺寸按仪表上报的面板参数自动适配，H.264 转码 30 FPS。", [
-                        .info("仪表画面", "按仪表上报 · H.264 · 30 FPS"),
-                        .info("本机 CarPlay", "1024×480 · H.264 · 30 FPS")
+                    SettingsSection("极核 AE2 5 寸", footer: "画面尺寸按仪表上报的面板参数自动适配，H.264 转码 \(selectedZeehoAE2FrameRate) FPS（帧率在「输出设置」中切换）。", [
+                        .info("仪表画面", "按仪表上报 · H.264 · \(selectedZeehoAE2FrameRate) FPS"),
+                        .info("本机 CarPlay", "1024×480 · H.264 · \(selectedZeehoAE2FrameRate) FPS")
                     ]),
                     SettingsSection("图标", [.control("CarPlay 图标大小", icon: ("square.grid.2x2.fill", .systemPurple), iconSizeControl)])
                 ]
@@ -2742,8 +2753,9 @@ extension ReceiverViewController {
                     .note(zeehoStatus)
                 ])]
             case .zeehoAE2:
-                return [SettingsSection("极核 AE2 5 寸（如 AE2 Pro）", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。自动查找会扫描当前 Wi-Fi 网段（约几秒）；关闭后可填写仪表实际 IP。画面尺寸跟随仪表上报值自动适配，H.264 转码 30 FPS。声音由 iPhone 或蓝牙输出。", [
+                return [SettingsSection("极核 AE2 5 寸（如 AE2 Pro）", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。自动查找会扫描当前 Wi-Fi 网段（约几秒）；关闭后可填写仪表实际 IP。画面尺寸跟随仪表上报值自动适配；帧率默认 30 FPS，60 FPS 为实验选项（参考项目同样默认 30）。声音由 iPhone 或蓝牙输出。", [
                     .control("自动查找仪表 IP", icon: ("network", .systemBlue), zeehoAutomaticSwitch),
+                    .control("仪表帧率", icon: ("gauge.with.dots.needle.67percent", .systemGreen), zeehoAE2FrameRateControl),
                     .field("仪表 IP 地址", zeehoAddressField, placeholder: "192.168.0.1"),
                     .note(zeehoStatus)
                 ])]

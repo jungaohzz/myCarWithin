@@ -31,6 +31,8 @@ struct ReceiverConfiguration {
     var zeehoAutomaticAddress = false
     /// AE2 5-inch instead of the verified 6.2-inch panel protocol profile.
     var zeehoIsAE2 = false
+    /// AE2 output frame rate; 30 is the reference default, 60 is its experimental option.
+    var zeehoFrameRate = 30
     var ninebotAddress: String?
     var tailingAddress: String?
     var tailingPhoneInfo: TailingPhoneInfo?

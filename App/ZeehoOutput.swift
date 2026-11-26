@@ -9,11 +9,13 @@ final class ZeehoOutput {
 
     deinit { stop() }
 
-    func start(localAddress: String, targetAddress: String, profile: TailingDisplayProfile, phone: TailingPhoneInfo,
+    func start(localAddress: String, targetAddress: String, profile: TailingDisplayProfile, frameRate: Int? = nil,
+               phone: TailingPhoneInfo,
                onState: @escaping (String) -> Void, onLog: @escaping (String) -> Void, requestKeyframe: @escaping () -> Void) {
         stop()
         let next = Session(queue: queue, localAddress: localAddress, targetAddress: targetAddress, profile: profile,
-                           phone: phone, onState: onState, onLog: onLog, requestKeyframe: requestKeyframe)
+                           frameRate: frameRate ?? profile.fps, phone: phone,
+                           onState: onState, onLog: onLog, requestKeyframe: requestKeyframe)
         session = next
         next.start()
     }
@@ -75,11 +77,12 @@ final class ZeehoOutput {
         private var sentPicture = false
         private var status = ""
 
-        init(queue: DispatchQueue, localAddress: String, targetAddress: String, profile: TailingDisplayProfile, phone: TailingPhoneInfo, onState: @escaping (String) -> Void, onLog: @escaping (String) -> Void,
+        init(queue: DispatchQueue, localAddress: String, targetAddress: String, profile: TailingDisplayProfile,
+             frameRate: Int, phone: TailingPhoneInfo, onState: @escaping (String) -> Void, onLog: @escaping (String) -> Void,
              requestKeyframe: @escaping () -> Void) {
             self.queue = queue
             self.width = profile.width; self.height = profile.height
-            self.fps = profile.fps
+            self.fps = frameRate
             self.connection = TailingConnection(localIP: localAddress, targetIP: targetAddress,
                 profile: profile, phone: phone, log: onLog)
             self.onState = onState
