@@ -96,7 +96,8 @@ final class NativeReceiver {
                     versionCode: Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0,
                     model: "iPhone", systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                     width: configuration.width, height: configuration.height, rotation: 1)
-                self.zeeho.start(localAddress: configuration.address, targetAddress: target, phone: phone,
+                self.zeeho.start(localAddress: configuration.address, targetAddress: target,
+                    profile: configuration.zeehoIsAE2 ? .zeehoAE2 : .zeeho62, phone: phone,
                     onState: { [weak self] in self?.onZeehoState?($0) },
                     onLog: { [weak self] in self?.log($0) },
                     requestKeyframe: { [weak self] in self?.requestKeyFrame(reason: "极核解码恢复") })

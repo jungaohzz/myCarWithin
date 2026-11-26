@@ -4,19 +4,16 @@ import VideoToolbox
 
 /// Runs codecs and UDP writes off the CarPlay receive queue.
 final class ZeehoOutput {
-    static let width = 1024
-    static let height = 480
-    static let fps = 25
-
     private let queue = DispatchQueue(label: "CarWithin.zeeho", qos: .userInitiated)
     private var session: Session?
 
     deinit { stop() }
 
-    func start(localAddress: String, targetAddress: String, phone: TailingPhoneInfo, onState: @escaping (String) -> Void,
-               onLog: @escaping (String) -> Void, requestKeyframe: @escaping () -> Void) {
+    func start(localAddress: String, targetAddress: String, profile: TailingDisplayProfile, phone: TailingPhoneInfo,
+               onState: @escaping (String) -> Void, onLog: @escaping (String) -> Void, requestKeyframe: @escaping () -> Void) {
         stop()
-        let next = Session(queue: queue, localAddress: localAddress, targetAddress: targetAddress, phone: phone, onState: onState, onLog: onLog, requestKeyframe: requestKeyframe)
+        let next = Session(queue: queue, localAddress: localAddress, targetAddress: targetAddress, profile: profile,
+                           phone: phone, onState: onState, onLog: onLog, requestKeyframe: requestKeyframe)
         session = next
         next.start()
     }
@@ -38,6 +35,9 @@ final class ZeehoOutput {
         let onState: (String) -> Void
         let onLog: (String) -> Void
         let requestKeyframe: () -> Void
+        var width: Int
+        var height: Int
+        let fps: Int
         private let lock = NSLock()
         private func locked<T>(_ body: () -> T) -> T {
             lock.lock(); defer { lock.unlock() }; return body()
@@ -58,6 +58,13 @@ final class ZeehoOutput {
         private var latest: CVPixelBuffer?
         private lazy var compositor = CIContext(options: [.useSoftwareRenderer: true, .cacheIntermediates: false])
         private var fresh = false
+        /// Adopt the instrument-reported panel size; the encoder rebuilds on the next frame.
+        private func adoptPanelSize(_ newWidth: Int, _ newHeight: Int) {
+            locked {
+                width = newWidth; height = newHeight
+                encoder?.invalidate(); encoder = nil
+            }
+        }
         private let origin = ProcessInfo.processInfo.systemUptime
         private var lastFrame = -Double.infinity
         private var lastKeyframe = -Double.infinity
@@ -68,11 +75,13 @@ final class ZeehoOutput {
         private var sentPicture = false
         private var status = ""
 
-        init(queue: DispatchQueue, localAddress: String, targetAddress: String, phone: TailingPhoneInfo, onState: @escaping (String) -> Void, onLog: @escaping (String) -> Void,
+        init(queue: DispatchQueue, localAddress: String, targetAddress: String, profile: TailingDisplayProfile, phone: TailingPhoneInfo, onState: @escaping (String) -> Void, onLog: @escaping (String) -> Void,
              requestKeyframe: @escaping () -> Void) {
             self.queue = queue
+            self.width = profile.width; self.height = profile.height
+            self.fps = profile.fps
             self.connection = TailingConnection(localIP: localAddress, targetIP: targetAddress,
-                profile: .zeeho62, phone: phone, log: onLog)
+                profile: profile, phone: phone, log: onLog)
             self.onState = onState
             self.onLog = onLog
             self.requestKeyframe = requestKeyframe
@@ -84,6 +93,10 @@ final class ZeehoOutput {
                 do {
                     try connection.start()
                     guard active else { return }
+                    if let panel = connection.reportedPanelSize(), panel.width != width || panel.height != height {
+                        adoptPanelSize(panel.width, panel.height)
+                        onLog("极核 AE2 面板尺寸 \(panel.width)×\(panel.height)，已按仪表上报值适配")
+                    }
                     report("仪表已连接，等待 CarPlay 画面…")
                     var first = true
                     var nextFrame = ProcessInfo.processInfo.systemUptime
@@ -94,7 +107,7 @@ final class ZeehoOutput {
                         let remaining = nextFrame - ProcessInfo.processInfo.systemUptime
                         if remaining > 0 { Thread.sleep(forTimeInterval: min(remaining, 0.04)); continue }
                         try connection.waitForH264Request()
-                        nextFrame = ProcessInfo.processInfo.systemUptime + 1.0 / Double(ZeehoOutput.fps)
+                        nextFrame = ProcessInfo.processInfo.systemUptime + 1.0 / Double(fps)
                         guard active else { break }
                         let result = queue.sync { () -> H264EncodedFrame? in
                             guard active, let image = latest else { return nil }
@@ -113,12 +126,12 @@ final class ZeehoOutput {
                             guard let recovered else { throw TailingError.timeout("等待 H.264 编码画面") }
                             try connection.sendH264(recovered.data)
                             first = false
-                            report("正在投屏 · 1024×480 · H.264")
+                            report("正在投屏 · \(width)×\(height) · H.264\(fps >= 50 ? " · 60 FPS" : "")")
                             continue
                         }
                         try connection.sendH264(result.data)
                         first = false
-                        report("正在投屏 · 1024×480 · H.264")
+                        report("正在投屏 · \(width)×\(height) · H.264\(fps >= 50 ? " · 60 FPS" : "")")
                     }
                 } catch {
                     if active {
@@ -207,8 +220,9 @@ final class ZeehoOutput {
             do {
                 if encoder == nil {
                     guard now - lastCodecFailure >= 0.5 else { return nil }
-                    encoder = try H264Encoder(width: ZeehoOutput.width, height: ZeehoOutput.height,
-                                              fps: ZeehoOutput.fps, bitrate: 2_500_000) { [weak self] result in
+                    let (targetWidth, targetHeight) = locked { (width, height) }
+                    encoder = try H264Encoder(width: targetWidth, height: targetHeight,
+                                              fps: fps, bitrate: fps >= 50 ? 4_000_000 : 2_500_000) { [weak self] result in
                         guard let self else { return }
                         self.locked { self.encoded = result }
                     }
@@ -238,7 +252,7 @@ final class ZeehoOutput {
         }
 
         private func fittedImage(_ image: CVPixelBuffer) throws -> CVPixelBuffer {
-            let width = ZeehoOutput.width, height = ZeehoOutput.height
+            let (width, height) = locked { (self.width, self.height) }
             if CVPixelBufferGetWidth(image) == width, CVPixelBufferGetHeight(image) == height { return image }
             var buffer: CVPixelBuffer?
             let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,

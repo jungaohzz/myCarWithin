@@ -123,6 +123,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var httpsExpanded: Bool { UserDefaults.standard.bool(forKey: httpsExpandedKey) }
     private let browserCard = UIStackView()
     private let zeehoCard = UIStackView()
+    private var zeehoCardTitleLabel: UILabel?
     private let zeehoCardStatus = UILabel()
     private let zeehoStatus = StatusLabel()
     private let zeehoAddressField = UITextField()
@@ -171,10 +172,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private lazy var pictureInPicture = CarPlayPictureInPicture(surface: videoSurface)
     private let keepAlive = BackgroundKeepAlive()
     private let keepAliveSwitch = UISwitch()
-    private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife", "AirPlay", "台铃 4.3 寸", "九号 5 寸", "极核 6.2 寸"])
+    private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife", "AirPlay", "台铃 4.3 寸", "九号 5 寸", "极核 6.2 寸", "极核 AE2 5 寸"])
     private enum HeadUnitOutput: Int {
-        case browser, carLife, airPlay, tailing, ninebot, zeeho
-        var usesInstrumentWiFi: Bool { self == .tailing || self == .ninebot || self == .zeeho }
+        // Appending new cases keeps persisted rawValue indices ("headUnitOutputV2") stable.
+        case browser, carLife, airPlay, tailing, ninebot, zeeho, zeehoAE2
+        var usesInstrumentWiFi: Bool { self == .tailing || self == .ninebot || self == .zeeho || self == .zeehoAE2 }
+        var isZeeho: Bool { self == .zeeho || self == .zeehoAE2 }
     }
     private var airPlayStreamID: UUID?
     private var airPlayStreamURL: URL?
@@ -420,7 +423,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         carLifeCard.addArrangedSubview(carLifeSettings)
         stack.addArrangedSubview(carLifeCard)
 
-        configureConnectionCard(zeehoCard, title: "极核 6.2 寸连接", symbol: "scooter", color: .systemBlue,
+        zeehoCardTitleLabel = configureConnectionCard(zeehoCard, title: "极核 6.2 寸连接", symbol: "scooter", color: .systemBlue,
             instructions: "让 iPhone 加入极核仪表 Wi-Fi，打开仪表投屏后启动 CarPlay。", status: zeehoCardStatus)
         let zeehoSettings = UIButton(type: .system)
         zeehoSettings.configuration = .tinted()
@@ -567,7 +570,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             self?.refreshFullscreenExitButton()
         }
         receiver.onZeehoState = { [weak self] message in
-            guard let self, self.running, self.outputMode == .zeeho else { return }
+            guard let self, self.running, self.outputMode.isZeeho else { return }
             self.updateZeehoStatus(message)
         }
         receiver.onNinebotState = { [weak self] message in
@@ -757,6 +760,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
             return DisplayPlan(width: 1024, height: 480, fps: 30, codec: .h264, iconWidthMM: icon)
         }
+        if outputMode == .zeehoAE2 {
+            let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
+            // CarPlay requires at least 320 per side; 960×480 keeps 2× headroom for the
+            // 480-level panel and the output stage downsamples to the reported size.
+            return DisplayPlan(width: 960, height: 480, fps: 60, codec: .h264, iconWidthMM: icon)
+        }
         if outputMode == .ninebot {
             let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
             return DisplayPlan(width: NinebotOutput.width, height: NinebotOutput.height,
@@ -942,8 +951,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         card.layer.cornerCurve = .continuous
     }
 
+    @discardableResult
     private func configureConnectionCard(_ card: UIStackView, title: String, symbol: String, color: UIColor,
-                                         instructions: String, status: UILabel) {
+                                         instructions: String, status: UILabel) -> UILabel {
         configureOutputCard(card)
         let icon = UIImageView(image: UIImage(systemName: symbol))
         icon.tintColor = color
@@ -967,6 +977,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         card.addArrangedSubview(header)
         card.addArrangedSubview(help)
         card.addArrangedSubview(status)
+        return titleLabel
     }
 
     private func refreshBrowserAddressLabels() {
@@ -989,7 +1000,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         secureVideoOutputPortField.placeholder = String(defaultSecurePort)
         portStatus.text = browserPortError ?? (running ? "停止 CarPlay 后可修改端口。" : "启动 CarPlay 后即可打开上方地址。")
         let showsLocalOutput = modeControl.selectedSegmentIndex != 2
-        zeehoCard.isHidden = !showsLocalOutput || outputMode != .zeeho
+        zeehoCard.isHidden = !showsLocalOutput || !outputMode.isZeeho
+        zeehoCardTitleLabel?.text = outputMode == .zeehoAE2 ? "极核 AE2 5 寸连接" : "极核 6.2 寸连接"
         if !running { updateZeehoStatus("等待启动 CarPlay · 仪表 IP：\(zeehoAddressField.text ?? "192.168.0.1")") }
         ninebotCard.isHidden = !showsLocalOutput || outputMode != .ninebot
         if !running { updateNinebotStatus("等待启动 CarPlay · 仪表 IP：\(ninebotAddressField.text ?? "")") }
@@ -1044,8 +1056,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         log("画面计划：\(plan.width)×\(plan.height) @ \(plan.fps) FPS \(plan.codec.displayName)（\(source)\(lightLevel > 0 ? "，减轻档 \(lightLevel)" : "")）")
         config.browserAudio = soundOutput == .browser && config.videoOutputPort != nil && outputMode == .browser
         if outputMode == .airPlay, config.videoOutputPort != nil { config.airPlayStreamID = UUID() }
-        if outputMode == .zeeho {
+        if outputMode.isZeeho {
             config.zeehoAddress = (zeehoAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            config.zeehoIsAE2 = outputMode == .zeehoAE2
         }
         if outputMode == .ninebot {
             config.ninebotAddress = (ninebotAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2221,6 +2234,15 @@ extension ReceiverViewController {
                     SettingsSection("图标", [.control("CarPlay 图标大小", icon: ("square.grid.2x2.fill", .systemPurple), iconSizeControl)])
                 ]
             }
+            if outputMode == .zeehoAE2 {
+                return [
+                    SettingsSection("极核 AE2 5 寸", footer: "画面尺寸按仪表上报的面板参数自动适配，帧率跟随仪表最高 60 FPS。", [
+                        .info("仪表画面", "按仪表上报 · H.264 · 最高 60 FPS"),
+                        .info("本机 CarPlay", "960×480 · H.264 · 60 FPS")
+                    ]),
+                    SettingsSection("图标", [.control("CarPlay 图标大小", icon: ("square.grid.2x2.fill", .systemPurple), iconSizeControl)])
+                ]
+            }
             if outputMode == .ninebot {
                 return [
                     SettingsSection("九号 5 寸", [
@@ -2547,6 +2569,11 @@ extension ReceiverViewController {
             case .tailing: return tailingOutputSections()
             case .zeeho:
                 return [SettingsSection("极核 AE4 MAX2+ 6.2 寸", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。声音由 iPhone 或蓝牙输出。", [
+                    .field("仪表 IP 地址", zeehoAddressField, placeholder: "192.168.0.1"),
+                    .note(zeehoStatus)
+                ])]
+            case .zeehoAE2:
+                return [SettingsSection("极核 AE2 5 寸（如 AE2 Pro）", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。画面尺寸与帧率按仪表上报自动适配（最高 60 FPS）。声音由 iPhone 或蓝牙输出。", [
                     .field("仪表 IP 地址", zeehoAddressField, placeholder: "192.168.0.1"),
                     .note(zeehoStatus)
                 ])]

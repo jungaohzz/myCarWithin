@@ -3,8 +3,12 @@ struct TailingDisplayProfile {
     let width: Int
     let height: Int
     let isZeeho: Bool
-    static let tailing43 = TailingDisplayProfile(width: 480, height: 272, isZeeho: false)
-    static let zeeho62 = TailingDisplayProfile(width: 1024, height: 480, isZeeho: true)
+    let fps: Int
+    /// AE2 5-inch: accept the instrument-reported panel size instead of fixed dimensions.
+    let acceptsReportedSize: Bool
+    static let tailing43 = TailingDisplayProfile(width: 480, height: 272, isZeeho: false, fps: 15, acceptsReportedSize: false)
+    static let zeeho62 = TailingDisplayProfile(width: 1024, height: 480, isZeeho: true, fps: 25, acceptsReportedSize: false)
+    static let zeehoAE2 = TailingDisplayProfile(width: 960, height: 480, isZeeho: true, fps: 60, acceptsReportedSize: true)
 }
 
 import Foundation
@@ -57,8 +61,15 @@ final class TailingConnection: @unchecked Sendable {
     private var sentH264Prefix = false
     private var mediaStarted = false
     private var configured = false
+    private var instrumentSize: (width: Int, height: Int)?
     private var isZeeho: Bool { profile.isZeeho }
     private var dashboard: String { profile.isZeeho ? "极核" : "台铃" }
+
+    /// Panel size the instrument reported during media config, when the profile follows it.
+    func reportedPanelSize() -> (width: Int, height: Int)? {
+        condition.lock(); defer { condition.unlock() }
+        return instrumentSize
+    }
 
     init(localIP: String, targetIP: String, profile: TailingDisplayProfile, phone: TailingPhoneInfo,
          ports: TailingPorts = .ios, identityProvider: @escaping () throws -> TailingIdentity = TailingIdentity.load,
@@ -377,7 +388,11 @@ final class TailingConnection: @unchecked Sendable {
                 }
                 let width = request.payload.uint16LE(0)
                 let height = request.payload.uint16LE(2)
-                let validDimensions = isZeeho ? width == 1024 && (height == 480 || height == 488)
+                // zeeho62 is verified against the 6.2-inch panel; the AE2 5-inch reports its
+                // own size, so accept any sane instrument-reported panel and follow it.
+                let validDimensions = profile.acceptsReportedSize
+                    ? width >= 320 && width <= 1920 && height >= 240 && height <= 1080
+                    : isZeeho ? width == 1024 && (height == 480 || height == 488)
                     : width == 480 && height == 272
                 guard validDimensions else {
                     throw TailingError.protocolFailure("仪表媒体尺寸 \(width)×\(height) 与 \(dashboard) 配置不符")
@@ -394,11 +409,16 @@ final class TailingConnection: @unchecked Sendable {
                       echoed == signature else { throw TailingError.protocolFailure("媒体身份回显不匹配") }
                 try identity.verify(echoed, huid: huid)
                 payload.appendLE(UInt32(isZeeho ? 2 : 1))
-                payload.appendLE(UInt16(profile.width))
-                payload.appendLE(UInt16(profile.height))
+                let replyWidth = profile.acceptsReportedSize ? width : profile.width
+                let replyHeight = profile.acceptsReportedSize ? height : profile.height
+                payload.appendLE(UInt16(replyWidth))
+                payload.appendLE(UInt16(replyHeight))
                 response = 0x11
+                if profile.acceptsReportedSize, replyWidth != profile.width || replyHeight != profile.height {
+                    condition.lock(); instrumentSize = (replyWidth, replyHeight); condition.unlock()
+                }
                 condition.lock(); configured = true; condition.unlock()
-                log("媒体身份回显校验通过，仪表报告 \(width)×\(height)，回应 \(isZeeho ? "H.264" : "JPEG") / \(profile.width)×\(profile.height)")
+                log("媒体身份回显校验通过，仪表报告 \(width)×\(height)，回应 \(isZeeho ? "H.264" : "JPEG") / \(replyWidth)×\(replyHeight)")
             case 0x70:
                 condition.lock(); let ready = configured; condition.unlock()
                 guard ready else { throw TailingError.protocolFailure("仪表在配置完成前请求媒体启动") }

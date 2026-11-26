@@ -10,8 +10,8 @@ CarWithin runs CarPlay on the same iPhone that generates its interface. Use CarP
 
 ## Download and install
 
-- [Download from GitHub Releases](https://github.com/xmz28/CarWithin/releases/latest). The current version is **1.0.4 (build 16)**.
-- Download `CarWithin-1.0.4-unsigned.ipa` and sign and install it with an IPA sideloading tool using your own signing setup. Follow any iOS prompts for developer trust or Developer Mode.
+- [Download from GitHub Releases](https://github.com/xmz28/CarWithin/releases/latest). The current version is **1.0.5 (build 17)**.
+- Download `CarWithin-1.0.5-unsigned.ipa` and sign and install it with an IPA sideloading tool using your own signing setup. Follow any iOS prompts for developer trust or Developer Mode.
 - The minimum installation target is iOS/iPadOS 15.0 on arm64. iOS 15.x has only been adapted at the compile level so far; same-device CarPlay, audio, and background behavior have not been tested on 15.x. Same-device CarPlay, audio, and background behavior still need testing on iOS 16.x hardware. CarWithin uses private iOS interfaces. Compatibility depends on the device, OS version, and signing setup, and OS updates can affect it.
 
 ## Quick start
@@ -79,6 +79,12 @@ Fixed display sizes support common landscape and portrait aspect ratios.
 Connect the iPhone to the instrument Wi-Fi, select the matching preset and choose ZEEHO 6.2-inch under Current output. Open projection on the instrument, then start CarPlay. The default instrument IP is 192.168.0.1. Video uses H.264 at 1024×480 and up to 25 fps. Audio plays through the iPhone or Bluetooth. Operate CarPlay on the phone.
 
 One instrument was tested successfully, including screen lock. Other models and long sessions require further testing.
+
+### ZEEHO AE2 5-inch display (e.g. AE2 Pro)
+
+Connect the iPhone to the instrument Wi-Fi, select the matching preset and choose ZEEHO AE2 5-inch under Current output. Open projection on the instrument, then start CarPlay. The default instrument IP is 192.168.0.1. Video follows the instrument-reported panel size (H.264); frame rate follows the instrument's per-frame requests, capped at 60 FPS. Audio plays through the iPhone or Bluetooth. Operate CarPlay on the phone.
+
+This mode targets the AE2 Pro 5-inch 60Hz panel and is implemented on a same-family protocol assumption; it has not been verified on a real instrument. If negotiation fails or the screen stays blank, report the "仪表报告" (instrument reported) lines from the diagnostic log.
 
 ### Ninebot 5-inch display
 

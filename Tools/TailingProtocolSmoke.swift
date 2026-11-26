@@ -45,9 +45,10 @@ struct TailingTests {
         try simulatedInstrument(identity: stableIdentity)
         try simulatedInstrument(identity: stableIdentity, profile: .zeeho62)
         try simulatedInstrument(identity: stableIdentity, profile: .zeeho62)
+        try simulatedInstrument(identity: stableIdentity, profile: .zeehoAE2)
         try rejectedInstrument()
         try cancelledHandshake()
-        print("PASS: 台铃拆包/合包、长度校验、RSA2048/type1、TCP取消、模拟仪表握手/逐帧拉取/保活/重启、错误型号拒绝、协商中停止")
+        print("PASS: 台铃拆包/合包、长度校验、RSA2048/type1、TCP取消、模拟仪表握手/逐帧拉取/保活/重启、极核AE2自适应尺寸、错误型号拒绝、协商中停止")
     }
 
     private static func frames() throws {
@@ -189,15 +190,18 @@ struct TailingTests {
                 }
                 let aux = try connect(ports.auxiliary)
                 var config = Data()
-                config.appendLE(UInt16(isZeeho ? 1024 : 480))
-                config.appendLE(UInt16(isZeeho ? 488 : 272))
+                // AE2 上报自有面板尺寸（如 854×480），其余沿用固定规格。
+                let reportedWidth = profile.acceptsReportedSize ? 854 : (isZeeho ? 1024 : 480)
+                let reportedHeight = profile.acceptsReportedSize ? 480 : (isZeeho ? 488 : 272)
+                config.appendLE(UInt16(reportedWidth))
+                config.appendLE(UInt16(reportedHeight))
                 config.append(Data(repeating: 0, count: 28)); config.append(Data(signature.base64EncodedString().utf8))
                 try aux.write(TailingProtocol.auxiliary(0x10, token: 57, payload: config))
                 let configured = try TailingProtocol.readAuxiliary { try aux.readExactly($0) }
                 try expect(configured.command == 0x11 && configured.token == 57 &&
                            configured.payload.uint32LE(0) == (isZeeho ? 2 : 1) &&
-                           configured.payload.uint16LE(4) == profile.width &&
-                           configured.payload.uint16LE(6) == profile.height, "媒体配置回应")
+                           configured.payload.uint16LE(4) == reportedWidth &&
+                           configured.payload.uint16LE(6) == reportedHeight, "媒体配置回应（自适应尺寸需回显仪表上报值）")
                 // 连续心跳、启动请求，验证不会丢弃配置后的消息。
                 try aux.write(TailingProtocol.auxiliary(0x40, token: 58) + TailingProtocol.auxiliary(0x70, token: 59))
                 try expect(try TailingProtocol.readAuxiliary { try aux.readExactly($0) }.token == 58, "媒体心跳回应")
@@ -240,6 +244,10 @@ struct TailingTests {
             } catch { result.set(error); sawFrame.signal(); gotHeartbeat.signal(); idleFramesReceived.signal() }
         }
         try connection.start()
+        if profile.acceptsReportedSize {
+            let panel = connection.reportedPanelSize()
+            try expect(panel?.width == 854 && panel?.height == 480, "AE2 需记录仪表上报面板尺寸")
+        }
         if isZeeho {
             for _ in 0..<2 {
                 try connection.waitForH264Request()

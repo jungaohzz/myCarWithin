@@ -39,14 +39,14 @@ jobs:
         run: |
           mkdir -p Payload
           cp -R "build/Build/Products/Release-iphoneos/TDSCarKit.app" Payload/
-          zip -qry CarWithin-1.0.4-ios15-unsigned.ipa Payload
-          shasum -a 256 CarWithin-1.0.4-ios15-unsigned.ipa
+          zip -qry CarWithin-1.0.5-ios15-unsigned.ipa Payload
+          shasum -a 256 CarWithin-1.0.5-ios15-unsigned.ipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: CarWithin-unsigned-ipa
-          path: CarWithin-1.0.4-ios15-unsigned.ipa
+          path: CarWithin-1.0.5-ios15-unsigned.ipa
 
       - name: Upload build log
         if: always()

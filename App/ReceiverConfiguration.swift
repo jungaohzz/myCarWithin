@@ -27,6 +27,8 @@ struct ReceiverConfiguration {
     /// Head unit IPv4 for CarLife discovery; nil sweeps the local network.
     var carLifeAddress: String?
     var zeehoAddress: String?
+    /// AE2 5-inch instead of the verified 6.2-inch panel protocol profile.
+    var zeehoIsAE2 = false
     var ninebotAddress: String?
     var tailingAddress: String?
     var tailingPhoneInfo: TailingPhoneInfo?
