@@ -725,9 +725,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         guard !ssid.isEmpty, ssid.utf8.count <= 32, let channel, (1...196).contains(channel) else {
             passwordStatus.text = "请输入有效的 Wi-Fi 名称和 1–196 的兼容信道。"; return false
         }
+        if !openNetworkSwitch.isOn, (passwordField.text ?? "").isEmpty {
+            loadWiFiPassword()
+        }
         let password = openNetworkSwitch.isOn ? "" : (passwordField.text ?? "")
         guard openNetworkSwitch.isOn || (8...63).contains(password.utf8.count) else {
-            passwordStatus.text = "Wi-Fi 密码需要 8–63 字节。"; return false
+            passwordStatus.text = "未获取到 Wi-Fi 密码：请手动填写，或保持「开放网络」开启。"; return false
         }
         do {
             try WiFiCredentials.save(password, for: ssid)
@@ -1242,26 +1245,30 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }
     private func loadWiFiPassword() {
         let ssid = ssidField.text ?? ""
-        // Merely revisiting the name field must not overwrite an edited password with Keychain.
-        guard passwordLoadedForSSID != ssid else { return }
+        // Merely revisiting the name field must not overwrite an edited password with Keychain;
+        // an empty field is not a hit, so each visit retries a network joined after launch.
+        guard passwordLoadedForSSID != ssid || (passwordField.text ?? "").isEmpty else { return }
         passwordLoadedForSSID = ssid
         var savedReadError: String?
         do {
-            if let saved = try WiFiCredentials.password(for: ssid) {
-                passwordField.text = saved; openNetworkSwitch.isOn = saved.isEmpty
+            // An empty stored password means "saved as open", not "this network is open" —
+            // keep looking so a system copy can fill in instead of blocking the switch.
+            if let saved = try WiFiCredentials.password(for: ssid), !saved.isEmpty {
+                passwordField.text = saved; openNetworkSwitch.isOn = false
                 passwordStatus.text = "已读取保存的 Wi-Fi 配置"
                 return
             }
         } catch { savedReadError = "无法读取已保存的密码（\(error.localizedDescription)），请重新输入。" }
         // TrollStore builds can read the password iOS saved when joining this network;
         // once found, keep a copy so it survives without the system keychain entitlement.
-        guard let system = SystemWiFiPassword.password(forSSID: ssid) else {
+        guard let system = SystemWiFiPassword.password(forSSID: ssid), !system.isEmpty else {
             if let savedReadError { passwordStatus.text = savedReadError; alert("Wi-Fi 密码读取失败", savedReadError, copies: true) }
             return
         }
-        passwordField.text = system; openNetworkSwitch.isOn = system.isEmpty
-        passwordStatus.text = savedReadError.map { system.isEmpty ? $0 : $0 + "已改用系统保存的密码。" }
-            ?? "已自动读取系统保存的 Wi-Fi 密码"
+        passwordField.text = system; openNetworkSwitch.isOn = false
+        passwordStatus.text = savedReadError == nil
+            ? "已自动读取系统保存的 Wi-Fi 密码"
+            : "已自动读取系统保存的 Wi-Fi 密码（本 App 保存的副本读取失败，已重新保存）"
         do { try WiFiCredentials.save(system, for: ssid) } catch {
             passwordStatus.text = "已自动读取系统保存的 Wi-Fi 密码（保存到本 App 失败：\(error.localizedDescription)）"
         }
@@ -1455,6 +1462,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         } else {
             outputPort = nil
             httpsPort = nil
+        }
+        if needsNetworkDetails, !openNetworkSwitch.isOn, (passwordField.text ?? "").isEmpty {
+            loadWiFiPassword()
         }
         guard !needsNetworkDetails || openNetworkSwitch.isOn || !(passwordField.text ?? "").isEmpty else {
             statusLabel.text = "请输入 Wi-Fi 密码；开放网络请选择“无密码”。"
@@ -2492,6 +2502,9 @@ extension ReceiverViewController {
             openNetworkSwitch.isOn = false; passwordLoadedForSSID = nil; passwordStatus.text = nil
         }
         activeWiFiForm = form
+        if editable {
+            loadWiFiPassword()
+        }
         let title = isAdding ? "添加 Wi-Fi" : editable ? "编辑 Wi-Fi" : "Wi-Fi 与网络"
         let controller = page(title) { [unowned self] in
             var current: [SettingsRow] = []
