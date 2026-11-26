@@ -74,6 +74,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var awaitingNetworkPermission = false
     private var activeWiFiForm: UUID?
     private var fetchingNetwork = false
+    /// An SSID typed in auto mode switched the source to manual; rebuild the page when editing ends.
+    private var wifiSourceNeedsRefresh = false
     private var canDetectWiFiName: Bool { (Bundle.main.object(forInfoDictionaryKey: "TDSWiFiNameDetection") as? String) == "YES" }
     private var autoDetectWiFiName: Bool { canDetectWiFiName && wifiNameSource.selectedSegmentIndex == 0 }
     /// The settings sheet while it is shown.
@@ -303,7 +305,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         ssidField.text = selectedPreset?.ssid ?? UserDefaults.standard.string(forKey: "wifiSSID")
         ssidField.addTarget(self, action: #selector(networkNameChanged), for: .editingChanged)
         ssidField.addTarget(self, action: #selector(ssidTypedByUser), for: .editingChanged)
-        ssidField.addTarget(self, action: #selector(loadWiFiPassword), for: .editingDidEnd)
+        ssidField.addTarget(self, action: #selector(ssidEditingEnded), for: .editingDidEnd)
         wifiNameSource.selectedSegmentIndex = min(max(
             UserDefaults.standard.object(forKey: "wifiNameSource") as? Int ?? 0, 0), wifiNameSource.numberOfSegments - 1)
         wifiNameSource.addTarget(self, action: #selector(wifiNameSourceChanged), for: .valueChanged)
@@ -1219,11 +1221,18 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }
 
     /// Typing an SSID is manual intent: leave auto mode so detection cannot overwrite it.
-    /// Deliberately does not reload the page — that would rebuild the list while typing.
+    /// No rebuild here — reload() defers while the field is editing; editingDidEnd rebuilds.
     @objc private func ssidTypedByUser() {
         guard autoDetectWiFiName else { return }
         wifiNameSource.selectedSegmentIndex = 1
         UserDefaults.standard.set(1, forKey: "wifiNameSource")
+        wifiSourceNeedsRefresh = true
+    }
+    @objc private func ssidEditingEnded() {
+        loadWiFiPassword()
+        guard wifiSourceNeedsRefresh else { return }
+        wifiSourceNeedsRefresh = false
+        reloadVisibleSettings()
     }
     @objc private func networkNameChanged() {
         passwordLoadedForSSID = nil
@@ -1231,7 +1240,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         // No table rebuild while the user is typing an SSID or composing Chinese text.
         refreshNetworkSummary()
     }
-    @objc private func loadWiFiPassword() {
+    private func loadWiFiPassword() {
         let ssid = ssidField.text ?? ""
         // Merely revisiting the name field must not overwrite an edited password with Keychain.
         guard passwordLoadedForSSID != ssid else { return }
