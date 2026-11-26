@@ -51,7 +51,7 @@ static Class ACCClientClass(void) {
 }
 - (BOOL)startWithIdentifier:(NSString *)identifier transportType:(NSUInteger)transportType error:(NSError **)error {
     [self stop];
-    if (transportType != 2 && transportType != 8) return Failed(error, @"不支持的本机传输类型。");
+    if (transportType != 2 && transportType != 3 && transportType != 8) return Failed(error, @"不支持的本机传输类型。");
 #if TARGET_OS_MACCATALYST || TARGET_OS_SIMULATOR
     return Failed(error, @"This transport test requires a physical iPhone; Catalyst and Simulator are not supported.");
 #else

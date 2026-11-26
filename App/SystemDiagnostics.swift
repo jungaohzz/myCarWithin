@@ -1,16 +1,20 @@
-import Foundation
 import Darwin
+import Foundation
 
-/// Evidence from outside the app: iOS keeps crash reports, daemon preferences and a unified
-/// log for CarPlay. A TrollStore build may be able to read them; when the sandbox refuses,
-/// the failed attempt is logged too, so one casting run still shows what was tried.
-/// The CarPlay daemon never talks back over iAP2, so these are the only channels that can
-/// reveal whether it crashed, gave up, or never tried.
+/// Evidence from outside the app: iOS keeps crash reports, daemon preferences, a process table,
+/// launchd state and a unified log for CarPlay. The build is TrollStore-signed with
+/// no-sandbox, so these reads can actually work; every failed attempt is logged with its
+/// reason, so one casting run still shows which channels the device refused.
+/// The CarPlay daemon never talks back over iAP2, so this is the only place that can show
+/// whether carplayd runs, crashed, was throttled, or tried to connect and was stopped.
 final class SystemDiagnostics: @unchecked Sendable {
     static let shared = SystemDiagnostics()
 
     private let queue = DispatchQueue(label: "CarWithin.systemdiagnostics", qos: .utility)
+    private let captureQueue = DispatchQueue(label: "CarWithin.systemdiagnostics.capture", qos: .utility)
     private var lastScan = Date.distantPast
+
+    // MARK: 总扫描
 
     func scan(reason: String) {
         queue.async { [self] in
@@ -21,14 +25,60 @@ final class SystemDiagnostics: @unchecked Sendable {
             }
             lastScan = now
             AppLog.record("系统诊断扫描开始 · \(reason)")
+            scanPaths()
             scanLogDirectories()
             scanPreferences()
+            scanDaemons()
+            scanCarplayBinary()
             scanUnifiedLog()
             AppLog.record("系统诊断扫描结束")
         }
     }
 
-    // MARK: 崩溃报告
+    // MARK: 通用 popen 读取（非阻塞，带时限）
+
+    /// Foundation.Process 不存在于 iOS SDK，只能 popen 走 /bin/sh。读取设成非阻塞，
+    /// 这样即使被探测的命令不输出，也不会卡死扫描队列。
+    private func run(command: String, maxSeconds: TimeInterval, maxLines: Int, tag: String) {
+        guard let pipe = popen(command, "r") else {
+            AppLog.record("系统诊断 · \(tag)：popen 失败（errno \(errno)，进程启动被拒绝）")
+            return
+        }
+        let fd = fileno(pipe)
+        let flags = fcntl(fd, F_GETFL)
+        if flags >= 0 { _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK) }
+        var buffer = [CChar](repeating: 0, count: 4096)
+        var lines = 0
+        var totalBytes = 0
+        let deadline = Date().addingTimeInterval(maxSeconds)
+        while Date() < deadline {
+            if fgets(&buffer, Int32(buffer.count), pipe) != nil {
+                let text = String(cString: buffer).trimmingCharacters(in: .newlines)
+                guard !text.isEmpty else { continue }
+                totalBytes += text.utf8.count
+                if lines < maxLines {
+                    AppLog.record("\(tag)｜\(text.prefix(300))")
+                    lines += 1
+                }
+            } else if feof(pipe) != 0 {
+                break
+            } else {
+                usleep(100_000)
+            }
+        }
+        _ = pclose(pipe)
+        AppLog.record("系统诊断 · \(tag) 结束：输出 \(lines) 行 / \(totalBytes) 字节")
+    }
+
+    // MARK: 路径与崩溃报告
+
+    private func scanPaths() {
+        let paths = ["/usr/libexec/carplayd", "/usr/bin/log", "/bin/launchctl", "/usr/bin/ps",
+                     "/usr/sbin/tcpdump", "/usr/bin/strings", "/usr/bin/grep", "/bin/sh",
+                     "/var/mobile/Library/Logs/DiagnosticReports", "/var/mobile/Library/Logs/CrashReporter"]
+        let present = paths.map { "\($0)=\(FileManager.default.fileExists(atPath: $0) ? "有" : "无")" }
+        AppLog.record("系统诊断 · 关键路径：\(present.joined(separator: "，"))")
+    }
 
     private func scanLogDirectories() {
         let directories = [
@@ -102,43 +152,110 @@ final class SystemDiagnostics: @unchecked Sendable {
                 AppLog.record("系统诊断 · \(domain)｜\(name) = \(description)")
             }
         }
+        for file in ["/var/mobile/Library/Preferences/com.apple.carplay.plist",
+                     "/var/mobile/Library/Preferences/com.apple.carplayd.plist",
+                     "/var/mobile/Library/Preferences/com.apple.CoreAccessories.plist"] {
+            let size = (try? FileManager.default.attributesOfItem(atPath: file)[.size] as? Int) ?? nil
+            AppLog.record("系统诊断 · 偏好文件 \(file) \(size.map { "\($0) 字节" } ?? "不存在或不可读")")
+        }
     }
 
-    // MARK: 统一日志
+    // MARK: 守护进程（carplayd 是否运行 / 崩溃 / 被 launchd 节流）
+
+    private func scanDaemons() {
+        run(command: #"ps -axo pid,ppid,user,comm 2>&1 | grep -i -E "carplay|accessor|accd|backboard|airplay" | head -40"#,
+            maxSeconds: 8, maxLines: 40, tag: "进程清单")
+        run(command: #"launchctl list 2>&1 | grep -i -E "carplay|accessor|accd" | head -40"#,
+            maxSeconds: 8, maxLines: 40, tag: "launchctl 列表")
+        run(command: #"launchctl print system/com.apple.carplayd 2>&1 | head -60"#,
+            maxSeconds: 8, maxLines: 60, tag: "carplayd 任务状态")
+        run(command: #"launchctl print system/com.apple.accessoryd 2>&1 | head -40"#,
+            maxSeconds: 8, maxLines: 40, tag: "accessoryd 任务状态")
+    }
+
+    // MARK: carplayd 二进制里的协议线索
+
+    private func scanCarplayBinary() {
+        run(command: #"grep -a -o -E ".{0,24}(rtsp|RTSP|7000|4301|StartSession|CarPlay).{0,24}" /usr/libexec/carplayd 2>&1 | head -120"#,
+            maxSeconds: 15, maxLines: 120, tag: "carplayd 二进制")
+    }
+
+    // MARK: 统一日志（已发生的）
 
     private func scanUnifiedLog() {
-        let path = "/usr/bin/log"
-        guard FileManager.default.isExecutableFile(atPath: path) else {
-            AppLog.record("系统诊断 · \(path) 不存在，无法读取统一日志（此设备不提供 log 命令）")
-            return
-        }
-        // Foundation.Process 不存在于 iOS SDK，只能用 popen 走 /bin/sh。
         let predicate = #"process CONTAINS[c] "carplay" OR senderImagePath CONTAINS[c] "CarPlay" OR subsystem CONTAINS[c] "carplay""#
-        let command = "\(path) show --last 5m --style compact --predicate '\(predicate)' 2>&1"
-        guard let pipe = popen(command, "r") else {
-            AppLog.record("系统诊断 · popen 启动 log show 失败（errno \(errno)）")
-            return
+        run(command: "log show --last 5m --style compact --predicate '\(predicate)' 2>&1 | head -c 150000",
+            maxSeconds: 20, maxLines: 120, tag: "系统日志")
+    }
+
+    // MARK: 实时日志流 / 网络抓包（投屏窗口内调用）
+
+    /// 在投屏尝试期间实时记录 CarPlay 相关系统日志：daemon 的拒绝/崩溃会当场出现，
+    /// 不用等它写进归档。命令自带 sleep+kill，读循环结束后进程一定退出。
+    func streamLogs(seconds: Int) {
+        captureQueue.async { [self] in
+            AppLog.record("实时系统日志开始 · 约 \(seconds) 秒 · CarPlay 相关")
+            let predicate = #"process CONTAINS[c] "carplay" OR subsystem CONTAINS[c] "carplay" OR eventMessage CONTAINS[c] "CarPlay""#
+            run(command: "log stream --style compact --predicate '\(predicate)' 2>&1 & TS=$!; sleep \(seconds); kill -TERM $TS 2>/dev/null",
+                maxSeconds: Double(seconds) + 6, maxLines: 200, tag: "实时系统日志")
         }
-        var buffer = [CChar](repeating: 0, count: 4096)
-        var lines = 0
-        var bytes = 0
-        var sawContent = false
-        let started = Date()
-        while fgets(&buffer, Int32(buffer.count), pipe) != nil {
-            bytes += strlen(buffer)
-            let line = String(cString: buffer).trimmingCharacters(in: .newlines)
-            if !line.isEmpty {
-                sawContent = true
-                if lines < 120 {
-                    AppLog.record("系统日志｜\(line.prefix(260))")
-                    lines += 1
+    }
+
+    /// tcpdump 判断守护进程到底有没有向本机端口发起连接：抓到了就是自己这一侧的问题，
+    /// 抓不到就是 carplayd 根本没尝试。没有 tcpdump 或没权限同样写入日志。
+    func captureNetwork(interface: String, seconds: Int) {
+        captureQueue.async { [self] in
+            guard FileManager.default.fileExists(atPath: "/usr/sbin/tcpdump") else {
+                AppLog.record("网络抓包跳过 · 本机没有 /usr/sbin/tcpdump（只能靠监听器和回连自测间接判断）")
+                return
+            }
+            let filter = interface == "lo0" ? "tcp port 7000" : "tcp port 7000 or arp"
+            AppLog.record("网络抓包开始 · \(interface) · 约 \(seconds) 秒 · 过滤 \(filter)")
+            run(command: "tcpdump -n -i \(interface) -c 120 \"\(filter)\" 2>&1 & TP=$!; sleep \(seconds); kill -TERM $TP 2>/dev/null",
+                maxSeconds: Double(seconds) + 6, maxLines: 120, tag: "抓包 \(interface)")
+        }
+    }
+
+    // MARK: 自检：本机监听端口能否回连
+
+    /// 证明 RTSP 端口在本机可回连；这样如果抓包也看不到 carplayd 的包，
+    /// 就能确定是守护进程没尝试，而不是我们的监听器有问题。
+    func selfConnectTest(port: UInt16) {
+        captureQueue.async { [self] in
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+            guard fd >= 0 else {
+                AppLog.record("回连自测 · socket 创建失败（errno \(errno)）")
+                return
+            }
+            defer { close(fd) }
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = port.bigEndian
+            address.sin_addr.s_addr = inet_addr("127.0.0.1")
+            let result = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                    connect(fd, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
                 }
             }
-            if Date().timeIntervalSince(started) > 15 { break }
+            if result == 0 {
+                AppLog.record("回连自测 · 成功连上 127.0.0.1:\(port)，设备监听端口可回连（carplayd 若尝试连接一定能到达）")
+            } else {
+                let code = errno
+                AppLog.record("回连自测 · 连接 127.0.0.1:\(port) 失败 errno \(code)（\(String(cString: strerror(code)))）")
+            }
         }
-        let status = pclose(pipe)
-        let elapsed = String(format: "%.1f", Date().timeIntervalSince(started))
-        AppLog.record("系统诊断 · log show 结束：日志 \(lines) 行、\(bytes) 字节、退出码 \(status)、耗时 \(elapsed) 秒\(sawContent ? "" : "（无 CarPlay 相关输出，说明这 5 分钟里系统守护进程没有留下记录）")")
+    }
+
+    // MARK: 尝试让 launchd 启动 carplayd
+
+    /// iOS 15 上 carplayd 可能根本没被拉起或被节流；kickstart 不需要重启、失败也能看原因。
+    func kickstartCarPlayDaemon() {
+        captureQueue.async { [self] in
+            AppLog.record("carplayd 启动实验 · launchctl kickstart system/com.apple.carplayd")
+            run(command: "launchctl kickstart system/com.apple.carplayd 2>&1; echo 退出码=$?",
+                maxSeconds: 6, maxLines: 20, tag: "carplayd 启动实验")
+        }
     }
 
     private static func stamp(_ date: Date) -> String {

@@ -30,6 +30,7 @@ final class SameDeviceProbe {
     private var effectiveTransportType: UInt = 2
     private var experimentWifiOnly = false
     private var experimentSkipWifi = false
+    private var experimentLoopback = false
     var onLog: ((String) -> Void)?
 
     private func hexPreview(_ data: Data, limit: Int = 96) -> String {
@@ -44,14 +45,16 @@ final class SameDeviceProbe {
         self.expectsLocalControl = expectsLocalControl
         startedAt = .now()
         let defaults = UserDefaults.standard
-        experimentTransportType = (defaults.object(forKey: "localTransportType") as? Int ?? 2) == 8 ? 8 : 2
+        let rawTransport = defaults.object(forKey: "localTransportType") as? Int ?? 2
+        experimentTransportType = (rawTransport == 8 || rawTransport == 3) ? UInt(rawTransport) : 2
         experimentWifiOnly = defaults.bool(forKey: "localWifiOnlyIdent")
         experimentSkipWifi = defaults.bool(forKey: "localSkipWifi")
+        experimentLoopback = defaults.bool(forKey: "localLoopbackSession")
         effectiveTransportType = experimentTransportType
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let wifi = configuration.ssid.isEmpty ? "Wi-Fi 未填写"
             : "Wi-Fi \(configuration.ssid)/信道 \(configuration.wifiChannel)/\(configuration.password.isEmpty ? "开放网络" : "密码 \(configuration.password.utf8.count) 字节")"
-        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")")
+        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")，0x4301 目标=127.0.0.1=\(experimentLoopback ? "是" : "否")")
         onLog?("本机传输能力（CoreAccessories）：" + String(DirectAccessoryTransport.apiSummary().prefix(1500)))
         if !AppLog.localCarPlaySupport.supported { onLog?("警告：\(AppLog.localCarPlaySupport.summary)") }
         let run = generation
@@ -129,18 +132,22 @@ final class SameDeviceProbe {
                                               channel: configuration.wifiChannel)
         }
         sessionRequests += 1
-        let live = ReceiverConfiguration.wifiIPv4Address() ?? "无 en0 地址"
-        if live != configuration.address {
-            onLog?("警告：0x4301 告知的地址 \(configuration.address) 与当前 en0 \(live) 不一致；守护进程若按此地址回连会连到错误主机")
+        let target = experimentLoopback ? "127.0.0.1" : configuration.address
+        if !experimentLoopback {
+            let live = ReceiverConfiguration.wifiIPv4Address() ?? "无 en0 地址"
+            if live != configuration.address {
+                onLog?("警告：0x4301 告知的地址 \(configuration.address) 与当前 en0 \(live) 不一致；守护进程若按此地址回连会连到错误主机")
+            }
         }
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt.uptimeNanoseconds) / 1_000_000_000
         let wifiText = wifi.map {
             "Wi-Fi \($0.ssid)（信道 \(Int($0.channel))，\($0.password.isEmpty ? "开放" : "密码 \($0.password.utf8.count) 字节")）"
         } ?? "不携带 Wi-Fi 组（实验）"
-        onLog?(String(format: "第 %d 次发送 0x4301 启动 CarPlay（启动后 %.1f 秒）：目标 %@:%d，%@，标识 %@，认证=%@，识别=%@",
-            sessionRequests, elapsed, configuration.address, Int(configuration.port), wifiText,
-            configuration.deviceID, authenticated ? "是" : "否", identified ? "是" : "否"))
-        try send(AccessoryMessages.startSession(address: configuration.address, port: configuration.port,
+        onLog?(String(format: "第 %d 次发送 0x4301 启动 CarPlay（启动后 %.1f 秒）：目标 %@:%d，%@，标识 %@，认证=%@，识别=%@%@",
+            sessionRequests, elapsed, target, Int(configuration.port), wifiText,
+            configuration.deviceID, authenticated ? "是" : "否", identified ? "是" : "否",
+            experimentLoopback ? "，回环实验（真实监听地址 \(configuration.address)）" : ""))
+        try send(AccessoryMessages.startSession(address: target, port: configuration.port,
             deviceID: configuration.deviceID, wifi: wifi))
     }
     private func stage(_ message: String) { onLog?(message); onStage?(message) }

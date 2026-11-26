@@ -182,10 +182,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private lazy var pictureInPicture = CarPlayPictureInPicture(surface: videoSurface)
     private let keepAlive = BackgroundKeepAlive()
     private let keepAliveSwitch = UISwitch()
-    /// iOS 15 本机 CarPlay 实验：0 = 传输类型 2，1 = 传输类型 8。
-    private let localTransportControl = ChoiceMenu(items: ["2（默认）", "8（实验）"])
+    /// iOS 15 本机 CarPlay 实验：传输类型 2 / 3（0x4300 里声明的值）/ 8，以及 0x4301 目标地址实验。
+    private let localTransportControl = ChoiceMenu(items: ["2（默认）", "3（实验）", "8（实验）"])
     private let localWifiOnlySwitch = UISwitch()
     private let localSkipWifiSwitch = UISwitch()
+    private let localLoopbackControl = ChoiceMenu(items: ["自动（en0）", "127.0.0.1（实验）"])
     private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife", "AirPlay", "台铃 4.3 寸", "九号 5 寸", "极核 6.2 寸", "极核 AE2 5 寸"])
     private enum HeadUnitOutput: Int {
         // Appending new cases keeps persisted rawValue indices ("headUnitOutputV2") stable.
@@ -873,11 +874,18 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }
     @objc private func localExperimentChanged() {
         let defaults = UserDefaults.standard
-        let transport = localTransportControl.selectedSegmentIndex == 1 ? 8 : 2
+        let transport: Int
+        switch localTransportControl.selectedSegmentIndex {
+        case 1: transport = 3
+        case 2: transport = 8
+        default: transport = 2
+        }
+        let loopback = localLoopbackControl.selectedSegmentIndex == 1
         defaults.set(transport, forKey: "localTransportType")
         defaults.set(localWifiOnlySwitch.isOn, forKey: "localWifiOnlyIdent")
         defaults.set(localSkipWifiSwitch.isOn, forKey: "localSkipWifi")
-        log("本机 CarPlay 实验设置：传输类型 \(transport)，0x1D01 仅 Wi-Fi 声明=\(localWifiOnlySwitch.isOn ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(localSkipWifiSwitch.isOn ? "是" : "否")；下一次启动本机 CarPlay 生效")
+        defaults.set(loopback, forKey: "localLoopbackSession")
+        log("本机 CarPlay 实验设置：传输类型 \(transport)，0x1D01 仅 Wi-Fi 声明=\(localWifiOnlySwitch.isOn ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(localSkipWifiSwitch.isOn ? "是" : "否")，0x4301 目标=127.0.0.1=\(loopback ? "是" : "否")；下一次启动本机 CarPlay 生效")
     }
     @objc private func appearanceChanged() {
         UserDefaults.standard.set(appearanceControl.selectedSegmentIndex, forKey: "carPlayAppearance")
@@ -1649,6 +1657,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 var live = config; live.port = port
                 self.log("RTSP 监听器就绪，端口 \(port)；开始 0x4301 会话请求")
                 self.controlBrowser.start()
+                // 证据链：daemon 是否在跑 → 端口能不能回连 → daemon 有没有发包 → 系统日志说了什么。
+                SystemDiagnostics.shared.kickstartCarPlayDaemon()
+                SystemDiagnostics.shared.selfConnectTest(port: port)
+                let loopback = UserDefaults.standard.bool(forKey: "localLoopbackSession")
+                SystemDiagnostics.shared.captureNetwork(interface: loopback ? "lo0" : "en0", seconds: 70)
+                SystemDiagnostics.shared.streamLogs(seconds: 60)
                 self.sameDevice.start(configuration: live, identity: identity)
             }
             prepareExternalOutput(configuration: config)
@@ -2088,12 +2102,18 @@ extension ReceiverViewController {
         pictureInPictureTiming.addTarget(self, action: #selector(pictureInPictureTimingChanged), for: .valueChanged)
         keepAliveSwitch.isOn = defaults.object(forKey: "backgroundKeepAlive") as? Bool ?? true
         keepAliveSwitch.addTarget(self, action: #selector(keepAliveChanged), for: .valueChanged)
-        localTransportControl.selectedSegmentIndex = (defaults.object(forKey: "localTransportType") as? Int ?? 2) == 8 ? 1 : 0
+        switch defaults.object(forKey: "localTransportType") as? Int ?? 2 {
+        case 3: localTransportControl.selectedSegmentIndex = 1
+        case 8: localTransportControl.selectedSegmentIndex = 2
+        default: localTransportControl.selectedSegmentIndex = 0
+        }
         localTransportControl.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
         localWifiOnlySwitch.isOn = defaults.bool(forKey: "localWifiOnlyIdent")
         localWifiOnlySwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
         localSkipWifiSwitch.isOn = defaults.bool(forKey: "localSkipWifi")
         localSkipWifiSwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
+        localLoopbackControl.selectedSegmentIndex = defaults.bool(forKey: "localLoopbackSession") ? 1 : 0
+        localLoopbackControl.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
         let savedOutput = defaults.object(forKey: "headUnitOutputV2") as? Int
         let previousOutput = defaults.object(forKey: "headUnitOutput") as? Int
         let legacyOutput: HeadUnitOutput = defaults.bool(forKey: "carLifeEnabled") ? .carLife : .browser
@@ -3100,10 +3120,11 @@ extension ReceiverViewController {
     }
 
     private func experimentSections() -> [SettingsSection] {
-        var sections = [SettingsSection("iOS 15 本机 CarPlay 实验", footer: "iAP2 握手与 0x4301 在 iOS 15.6 已全部成功，但系统 CarPlay 守护进程从不回连。这些开关逐项改变配件声明与 0x4301 的组合，用来定位守护进程的判定条件；修改后下一次启动本机 CarPlay 才生效，日志会记录实际组合。传输类型 8 失败会自动回退 2。系统诊断扫描会尝试读取崩溃报告、CarPlay 偏好设置与统一日志，读取失败同样写入日志。", [
+        var sections = [SettingsSection("iOS 15 本机 CarPlay 实验", footer: "iAP2 握手与 0x4301 在 iOS 15.6 已全部成功，但系统 CarPlay 守护进程从不回连。这些开关逐项改变配件声明与 0x4301 的组合，用来定位守护进程的判定条件；修改后下一次启动本机 CarPlay 才生效，日志会记录实际组合。传输类型 3 对应 0x4300 里声明的值，8 为旧实验，失败都会自动回退 2。每次本机 CarPlay 启动还会：尝试 kickstart carplayd、自测回连端口、抓包 70 秒、实时记录系统日志 60 秒、12 秒后扫描崩溃报告/偏好/launchctl/进程表/carplayd 二进制。读取失败同样写入日志。", [
             .control("本机传输类型", icon: ("cable.connector", .systemIndigo), localTransportControl),
             .control("0x1D01 仅声明 Wi-Fi 传输", icon: ("wifi", .systemBlue), localWifiOnlySwitch),
             .control("0x4301 跳过 Wi-Fi 凭据", icon: ("key.slash", .systemOrange), localSkipWifiSwitch),
+            .control("0x4301 目标地址", icon: ("arrow.triangle.2.circlepath", .systemPurple), localLoopbackControl),
             .action("扫描系统诊断（崩溃报告 / 偏好 / 日志）", icon: ("stethoscope", .systemTeal)) { [unowned self] in
                 SystemDiagnostics.shared.scan(reason: "手动扫描")
                 self.alert("已开始扫描", "结果写入日志，稍后到「日志」查看。")
