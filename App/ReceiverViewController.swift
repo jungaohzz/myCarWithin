@@ -1328,6 +1328,19 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
     }
     @objc private func detectNetwork() { refreshCurrentNetwork(requestPermission: true) }
+    /// 把系统当前 Wi-Fi 与预设 SSID 一起写进日志：0x4301 里的 SSID 不对时 iOS 不会回连 CarPlay。
+    private func logCurrentWiFi(configured: String) {
+        NEHotspotNetwork.fetchCurrent { [weak self] network in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let network else {
+                    self.log("当前 Wi-Fi：无法读取 SSID（需要定位权限）；预设 \(configured.isEmpty ? "未填写" : configured)")
+                    return
+                }
+                self.log("当前 Wi-Fi：\(network.ssid)（\(network.isSecure ? "加密" : "开放")）；预设 \(configured.isEmpty ? "未填写" : configured)\(network.ssid == configured ? "，一致" : "，不一致：0x4301 将使用预设值")")
+            }
+        }
+    }
     @objc private func wifiNameSourceChanged() {
         UserDefaults.standard.set(wifiNameSource.selectedSegmentIndex, forKey: "wifiNameSource")
         if autoDetectWiFiName, !running { detectNetwork() }
@@ -1612,9 +1625,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             UIApplication.shared.isIdleTimerDisabled = true
             let startupID = UUID()
             localStartupID = startupID
+            let support = AppLog.localCarPlaySupport
+            log("启动本机 CarPlay · \(support.summary) · 本机回调 \(address):\(config.port) · 预设 Wi-Fi \(config.ssid.isEmpty ? "未填写" : config.ssid)/信道 \(config.wifiChannel)/\(config.password.isEmpty ? "开放" : "密码 \(config.password.utf8.count) 字节") · 分辨率 \(config.width)×\(config.height) @ \(config.maxFPS) FPS · \(config.videoCodec.displayName)")
+            logCurrentWiFi(configured: config.ssid)
             receiver.onListening = { [weak self] port in
                 guard let self, self.running, self.localStartupID == startupID else { return }
                 var live = config; live.port = port
+                self.log("RTSP 监听器就绪，端口 \(port)；开始 0x4301 会话请求")
                 self.controlBrowser.start()
                 self.sameDevice.start(configuration: live, identity: identity)
             }
@@ -1763,7 +1780,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let task = DispatchWorkItem { [weak self] in
             guard let self, self.startupHintGeneration == generation, self.running,
                   !self.displayedVideo, self.modeControl.selectedSegmentIndex == 1 else { return }
-            self.startupHint.text = "连接较久时，可尝试在系统设置中关闭再打开 Wi-Fi。当前仍在继续连接。"
+            let support = AppLog.localCarPlaySupport
+            self.startupHint.text = support.supported
+                ? "连接较久时，可尝试在系统设置中关闭再打开 Wi-Fi。当前仍在继续连接。"
+                : "本机 CarPlay 需要 iOS 16.0+，当前系统低于要求，连接不会建立（详见日志）。"
             self.startupHint.isHidden = false
         }
         startupHintTask = task

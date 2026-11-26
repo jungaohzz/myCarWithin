@@ -105,9 +105,12 @@ enum TailingDiscovery {
         let passes = 4
         for pass in 1...passes {
             try check()
+            let passStarted = ProcessInfo.processInfo.systemUptime
             if pass > 1 { log("自动查找第 \(pass)/\(passes) 轮，继续扫描 \(subnet)…") }
+            var batch = 0
             for start in stride(from: 0, to: addresses.count, by: 16) {
                 try check()
+                batch += 1
                 let results = Connections()
                 let group = DispatchGroup()
                 for address in addresses[start..<min(start + 16, addresses.count)] {
@@ -132,22 +135,28 @@ enum TailingDiscovery {
                 }
                 group.wait()
                 let connected = results.take()
+                log("自动查找第 \(pass)/\(passes) 轮第 \(batch) 批：\(start + 1)–\(min(start + 16, addresses.count)) / \(addresses.count)，连接成功 \(connected.count) 个")
                 do { try check() }
                 catch { connected.forEach { $0.socket.close() }; throw error }
                 for address in addresses[start..<min(start + 16, addresses.count)] {
                     if let selected = connected.first(where: { $0.address == address }) {
                         connected.filter { $0.address != address }.forEach { $0.socket.close() }
-                        log("自动查找命中 \(address):\(port)（第 \(pass) 轮）")
+                        log(String(format: "自动查找命中 %@:%d（第 %d 轮第 %d 批，耗时 %.1f 秒）", address, Int(port), pass, batch,
+                                   ProcessInfo.processInfo.systemUptime - passStarted))
                         return selected
                     }
                 }
             }
             if pass < passes {
-                log("第 \(pass) 轮未发现仪表 10930 端口，3 秒后重试（仪表投屏页可能尚未就绪）")
+                log(String(format: "第 %d 轮未发现仪表 10930 端口（扫描 %d 个地址，耗时 %.1f 秒），3 秒后重试（仪表投屏页可能尚未就绪）",
+                           pass, addresses.count, ProcessInfo.processInfo.systemUptime - passStarted))
                 for _ in 0..<30 {
                     try check()
                     Thread.sleep(forTimeInterval: 0.1)
                 }
+            } else {
+                log(String(format: "第 %d 轮仍未发现仪表（扫描 %d 个地址，耗时 %.1f 秒，EPERM %d 次）",
+                           pass, addresses.count, ProcessInfo.processInfo.systemUptime - passStarted, denied.peek()))
             }
         }
         if denied.take() > 0 {
@@ -161,6 +170,7 @@ enum TailingDiscovery {
         private var value = 0
         func increment() { lock.lock(); value += 1; lock.unlock() }
         func take() -> Int { lock.lock(); defer { lock.unlock() }; let result = value; value = 0; return result }
+        func peek() -> Int { lock.lock(); defer { lock.unlock() }; return value }
     }
 
     private final class Connections: @unchecked Sendable {

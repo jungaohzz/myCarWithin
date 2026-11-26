@@ -38,6 +38,28 @@ final class AppLog: @unchecked Sendable {
         open()
         write("App 启动 · \(AppLog.environmentSummary())")
         write("网络接口 · \(AppLog.interfaceSummary())")
+        write("本机 CarPlay · \(AppLog.localCarPlaySupport.summary)")
+        write("磁盘 · \(AppLog.storageSummary())")
+    }
+
+    /// 本机 CarPlay（自建 iAP2 配件端点）从 iOS 16 起可用；参考项目 CarWithin 明确要求
+    /// iOS/iPadOS 16.0+，且其发布包最低 iOS 16.4。iOS 15 能完成 iAP2 握手，但 CarPlay
+    /// 守护进程不会回连，因此这里把系统版本写进日志和超时提示。
+    static var localCarPlaySupport: (supported: Bool, summary: String) {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        let text = "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
+        if version.majorVersion >= 16 {
+            return (true, "iOS \(text) 满足 iOS 16.0+ 要求")
+        }
+        return (false, "警告：当前 iOS \(text)，本机 CarPlay 需要 iOS 16.0+（参考项目明确不支持 iOS 15），CarPlay 会话不会启动")
+    }
+
+    static func storageSummary() -> String {
+        let values = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())
+        let free = (values?[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
+        let total = (values?[.systemSize] as? NSNumber)?.int64Value ?? 0
+        let process = ProcessInfo.processInfo
+        return "磁盘可用 \(free / 1_048_576) MiB / 共 \(total / 1_048_576) MiB，设备内存 \(process.physicalMemory / 1_048_576) MiB，低电量模式 \(process.isLowPowerModeEnabled ? 1 : 0)，热状态 \(process.thermalState.rawValue)"
     }
 
     var currentFile: URL { queue.sync { currentURL } }

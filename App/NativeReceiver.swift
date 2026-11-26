@@ -44,6 +44,13 @@ final class NativeReceiver {
     private var displaySize: (width: Int, height: Int)?
     private var nightMode: Bool?
     private var generation = UUID()
+    // 视频路径统计（发布版也记录，用于用户日志），每 10 秒输出一次。
+    private var receivedFirstVideoFrame = false
+    private var statsStarted = ProcessInfo.processInfo.systemUptime
+    private var sessionStarted = ProcessInfo.processInfo.systemUptime
+    private var statsFrames = 0
+    private var statsBytes = 0
+    private var statsKeyframes = 0
     private var airPlayIdentity: AirPlayCredentials?
     private let videoOutput = VideoOutputServer()
     private let carLife = CarLifeOutput()
@@ -173,6 +180,7 @@ final class NativeReceiver {
                     "pi": airPlayIdentity.identifier, "pk": airPlayIdentity.signingKey.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()]
                 candidate.service = NWListener.Service(name: configuration.name, type: "_airplay._tcp", txtRecord: NWTXTRecord(txt))
                 candidate.serviceRegistrationUpdateHandler = { [weak self] change in self?.log("Bonjour 注册状态：\(change)") }
+                log("Bonjour TXT：\(txt.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value.prefix(64))" }.joined(separator: " "))")
             }
             listener = candidate
             candidate.stateUpdateHandler = { [weak self, weak candidate] state in
@@ -205,20 +213,32 @@ final class NativeReceiver {
             }
             candidate.newConnectionHandler = { [weak self, weak candidate] connection in
                 guard let self, self.generation == generation, self.listener === candidate,
-                      self.connections.count < 8 else { connection.cancel(); return }
+                      self.connections.count < 8 else {
+                    if let self { self.log("拒绝额外的控制连接（\(Self.endpointText(connection.endpoint))，已满 8 个或监听器已停止）") }
+                    connection.cancel(); return
+                }
                 let id = UUID(); self.connections[id] = connection
                 let state = SessionState(credentials: self.airPlayIdentity)
                 self.sessions[id] = state
                 if case .hostPort(let host, _) = connection.endpoint { state.peerAddress = "\(host)" }
+                self.log("收到 TCP 连接请求：\(Self.endpointText(connection.endpoint))（第 \(self.connections.count) 个）")
+                var ready = false
                 connection.stateUpdateHandler = { [weak self, weak connection] update in
                     guard let self, let connection else { return }
                     switch update {
                     case .ready:
-                        self.log("收到控制连接")
+                        ready = true
+                        self.log("收到控制连接 · \(state.peerAddress)")
                         DispatchQueue.main.async { [weak self] in self?.onControlConnected?() }
                         self.receive(connection, id: id, state: state, configuration: configuration, identity: identity)
-                    case .failed, .cancelled:
+                    case .failed(let error):
+                        if ready { self.log("控制连接失败：\(error.localizedDescription)（\(state.peerAddress)）") }
                         state.media?.stop(); self.sessions.removeValue(forKey: id); self.connections.removeValue(forKey: id)
+                    case .cancelled:
+                        if ready { self.log("控制连接已关闭（\(state.peerAddress)）") }
+                        state.media?.stop(); self.sessions.removeValue(forKey: id); self.connections.removeValue(forKey: id)
+                    case .waiting(let error):
+                        self.log("控制连接等待中：\(error.localizedDescription)（\(state.peerAddress)）")
                     default: break
                     }
                 }
@@ -313,6 +333,10 @@ final class NativeReceiver {
         let ms = (DispatchTime.now().uptimeNanoseconds - since.uptimeNanoseconds) / 1_000_000
         log("关键帧已到达（\(ms) ms，\(keyframeAttempts) 次请求）")
     }
+    private static func endpointText(_ endpoint: NWEndpoint) -> String {
+        if case .hostPort(let host, let port) = endpoint { return "\(host):\(port)" }
+        return "非 TCP 端点"
+    }
     private static func containsRandomAccess(_ accessUnit: Data, codec: VideoCodec) -> Bool {
         (try? AnnexB.units(in: accessUnit))?.contains { codec.isRandomAccess($0) } ?? false
     }
@@ -332,6 +356,9 @@ final class NativeReceiver {
         diagnosticGap = 0; diagnosticWork = 0; diagnosticMainDelay = 0; diagnosticMainWork = 0
         #endif
         localSkipping = false; keyframeWantedSince = nil; keyframeLastSent = nil; keyframeAttempts = 0
+        receivedFirstVideoFrame = false
+        statsStarted = ProcessInfo.processInfo.systemUptime; sessionStarted = statsStarted
+        statsFrames = 0; statsBytes = 0; statsKeyframes = 0
         touchSlots.reset()
         for connection in connections.values { connection.cancel() }
         connections.removeAll()
@@ -366,7 +393,7 @@ final class NativeReceiver {
                     while true {
                         let plaintext = try state.cipher?.receive(input) ?? input
                         guard let request = try state.parser.append(plaintext, maximumRequests: 1).first else { break }
-                        self.log("\(request.method) \(request.target.prefix(100)) [\(request.body.count) 字节]")
+                        self.log("\(request.method) \(request.target.prefix(100)) [\(request.body.count) 字节] ← \(state.peerAddress)\(state.cipher != nil ? "（加密）" : "")")
                         let response = try self.respond(request, state: state, configuration: configuration, identity: identity)
                         let encoded = response.encoded(for: request)
                         let wire = try state.cipher?.encrypt(encoded) ?? encoded
@@ -398,6 +425,7 @@ final class NativeReceiver {
                 throw ProtocolError.malformed("在配件会话通过验证前收到 SETUP")
             }
             if state.media == nil {
+                log("处理 SETUP 请求 [\(request.body.count) 字节] ← \(state.peerAddress)")
                 let media = CarPlayMediaSession(queue: queue, secret: secret, peerAddress: state.peerAddress,
                                                 audioEnabled: configuration.audioEnabled, hevc: configuration.videoCodec == .h265)
                 media.onLog = { [weak self] in self?.log($0) }
@@ -415,6 +443,20 @@ final class NativeReceiver {
                         work: ProcessInfo.processInfo.systemUptime - diagnosticArrival) }
                     #endif
                     let keyframe = Self.containsRandomAccess(data, codec: codec)
+                    if !self.receivedFirstVideoFrame {
+                        self.receivedFirstVideoFrame = true
+                        self.log("已收到第一帧 CarPlay 视频（\(codec.displayName)，\(data.count) 字节，关键帧=\(keyframe)）")
+                    }
+                    self.statsFrames += 1; self.statsBytes += data.count
+                    if keyframe { self.statsKeyframes += 1 }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    let elapsed = now - self.statsStarted
+                    if elapsed >= 10 {
+                        self.log(String(format: "投屏统计：%.1f FPS / %.0f KiB/s，关键帧 %d，本机队列 %d，已运行 %.0f 秒",
+                            Double(self.statsFrames) / elapsed, Double(self.statsBytes) / elapsed / 1024,
+                            self.statsKeyframes, self.localInFlight, now - self.sessionStarted))
+                        self.statsStarted = now; self.statsFrames = 0; self.statsBytes = 0; self.statsKeyframes = 0
+                    }
                     if keyframe { self.keyframeArrived() }
                     self.videoOutput.append(data, codec: codec)
                     if configuration.zeehoAddress != nil { self.zeeho.append(data, codec: codec, keyframe: keyframe) }
@@ -469,12 +511,13 @@ final class NativeReceiver {
             return RTSPResponse(body: try verify.handle(request.body), contentType: "application/pairing+tlv8")
         case ("GET", "/info"), ("POST", "/info"):
             let info = CarPlayInfo.build(configuration)
-            return RTSPResponse(body: try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0),
-                                contentType: "application/x-apple-binary-plist")
+            let body = try PropertyListSerialization.data(fromPropertyList: info, format: .binary, options: 0)
+            log("回应 /info：\(info.count) 个字段，\(body.count) 字节（请求 \(request.body.count) 字节）")
+            return RTSPResponse(body: body, contentType: "application/x-apple-binary-plist")
         case ("POST", "/auth-setup"):
             let body = try MFiSAP.respond(to: request.body, identity: identity)
             state.authenticated = true
-            log("已生成 MFiSAP 响应，正在等待 iPhone 接受")
+            log("已生成 MFiSAP 响应（请求 \(request.body.count) 字节，证书链 \(identity.certificateChain.count) 份，回应 \(body.count) 字节），正在等待 iPhone 接受")
             return RTSPResponse(body: body)
         case ("POST", "/feedback"):
             if let feedback = try state.media?.feedback() {

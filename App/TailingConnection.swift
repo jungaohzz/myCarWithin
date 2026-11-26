@@ -65,6 +65,27 @@ final class TailingConnection: @unchecked Sendable {
     private var instrumentSize: (width: Int, height: Int)?
     private var isZeeho: Bool { profile.isZeeho }
     private var dashboard: String { profile.isZeeho ? "极核" : "台铃" }
+    private var commandCounts: [UInt32: Int] = [:]
+    private var auxiliaryCounts: [UInt16: Int] = [:]
+    private var pulls = 0
+    private var pullWaitTotal = 0.0
+    private var pullWaitMax = 0.0
+    private var recentPulls = 0
+    private var recentWaitTotal = 0.0
+    private var recentWaitMax = 0.0
+    private var recentWindowStarted = ProcessInfo.processInfo.systemUptime
+    private var sentFrames = 0
+    private var sentBytes = 0
+
+    private func hexPreview(_ data: Data, limit: Int = 64) -> String {
+        let text = data.prefix(limit).map { String(format: "%02X", $0) }.joined(separator: " ")
+        return data.count > limit ? "\(text) …（共 \(data.count) 字节）" : text
+    }
+
+    private func textPreview(_ data: Data, limit: Int = 160) -> String {
+        let text = String(decoding: data.prefix(limit), as: UTF8.self).replacingOccurrences(of: "\0", with: "")
+        return data.count > limit ? "\(text)…（共 \(data.count) 字节）" : text
+    }
 
     /// Panel size the instrument reported during media config, when the profile follows it.
     func reportedPanelSize() -> (width: Int, height: Int)? {
@@ -80,7 +101,9 @@ final class TailingConnection: @unchecked Sendable {
     }
 
     func start() throws {
+        log("\(dashboard) 投屏参数：\(isZeeho ? "H.264" : "JPEG")，请求面板 \(profile.width)×\(profile.height) @ \(profile.fps) FPS，跟随仪表尺寸=\(profile.acceptsReportedSize)，端口 \(ports.control)/\(ports.auxiliary)/\(ports.video)（announcement \(ports.announcement)），本机 \(localIP)，目标 \(targetIP.isEmpty ? "自动查找" : targetIP)")
         let loaded = try identityProvider()
+        log("\(dashboard) 本机身份已载入（phoneID \(loaded.phoneID)）")
         condition.lock(); identity = loaded; condition.unlock()
         // Empty address: scan the phone's own subnet for the instrument's announcement port.
         // The default 192.168.0.1 is only a placeholder; AE2 Pro hotspots do not all use it.
@@ -122,7 +145,15 @@ final class TailingConnection: @unchecked Sendable {
         condition.lock()
         defer { condition.unlock() }
         while !closed && failure == nil && (signedHUID == nil || video == nil || !mediaStarted || (isZeeho && reverseControl == nil)) {
-            if !condition.wait(until: deadline) { throw TailingError.timeout("媒体会话未就绪，请退出官方投屏并重新开启仪表投屏") }
+            if !condition.wait(until: deadline) {
+                var missing: [String] = []
+                if signedHUID == nil { missing.append("身份签名") }
+                if video == nil { missing.append("视频通道 TCP\(ports.video)") }
+                if !mediaStarted { missing.append("媒体启动 0x70") }
+                if isZeeho && reverseControl == nil { missing.append("反向控制 TCP\(ports.control)") }
+                log("\(dashboard) 等待媒体会话超时，缺少：\(missing.isEmpty ? "未知条件" : missing.joined(separator: "、"))")
+                throw TailingError.timeout("媒体会话未就绪（缺少 \(missing.joined(separator: "、"))），请退出官方投屏并重新开启仪表投屏")
+            }
         }
         try checkLocked()
         if isZeeho {
@@ -173,10 +204,15 @@ final class TailingConnection: @unchecked Sendable {
     // 视频请求与发送由同一个会话任务顺序执行。
     func sendH264(_ accessUnit: Data) throws {
         let socket = try videoSocket()
-        let packet = try TailingProtocol.h264(accessUnit, includePrefix: !sentH264Prefix)
+        let includePrefix = !sentH264Prefix
+        let packet = try TailingProtocol.h264(accessUnit, includePrefix: includePrefix)
         do {
             try socket.write(packet)
             sentH264Prefix = true
+            sentFrames += 1; sentBytes += accessUnit.count
+            if sentFrames == 1 {
+                log("已发送首帧 H.264（\(accessUnit.count) 字节，含前缀=\(includePrefix)，前 16 字节 \(hexPreview(accessUnit, limit: 16))）")
+            }
         } catch {
             throw terminalError(or: TailingError.channel("发送 H.264", error))
         }
@@ -204,6 +240,18 @@ final class TailingConnection: @unchecked Sendable {
             throw TailingError.protocolFailure(String(format: "视频通道收到 0x%04x（%d 字节），预期空载荷 0x72",
                                                      Int(request.command), request.payload.count))
         }
+        pulls += 1; pullWaitTotal += pullWait; pullWaitMax = max(pullWaitMax, pullWait)
+        recentPulls += 1; recentWaitTotal += pullWait; recentWaitMax = max(recentWaitMax, pullWait)
+        if pulls == 1 { log("\(dashboard) 收到首个视频拉帧请求 0x72") }
+        let elapsed = ProcessInfo.processInfo.systemUptime - recentWindowStarted
+        if elapsed >= 10 {
+            log(String(format: "%@ 视频拉帧统计：最近 %.0f 秒 %d 次（%.1f/s），等待平均 %.0f ms / 最大 %.0f ms；累计 %d 帧 / %.0f KiB，平均等待 %.0f ms",
+                       dashboard, elapsed, recentPulls, Double(recentPulls) / elapsed,
+                       recentWaitTotal / Double(recentPulls) * 1000, recentWaitMax * 1000,
+                       sentFrames, Double(sentBytes) / 1024, pullWaitTotal / Double(pulls) * 1000))
+            recentWindowStarted = ProcessInfo.processInfo.systemUptime
+            recentPulls = 0; recentWaitTotal = 0; recentWaitMax = 0
+        }
         return (socket, pullWait)
     }
 
@@ -228,10 +276,12 @@ final class TailingConnection: @unchecked Sendable {
         closed = true
         let sockets = resources
         let pendingTimers = timers
-        let reverse = failure == nil ? reverseControl : nil
+        let endingFailure = failure
+        let reverse = endingFailure == nil ? reverseControl : nil
         resources.removeAll(); timers.removeAll()
         condition.broadcast()
         condition.unlock()
+        if let endingFailure { log("\(dashboard) 会话关闭，原因：\(endingFailure.localizedDescription)") }
         pendingTimers.forEach { $0.cancel() }
         if let reverse {
             do {
@@ -242,6 +292,9 @@ final class TailingConnection: @unchecked Sendable {
             }
         }
         sockets.forEach { $0.close() }
+        if endingFailure == nil {
+            log("\(dashboard) 会话主动停止：已发送 \(sentFrames) 帧 / \(sentBytes / 1024) KiB，收到拉帧 \(pulls) 次")
+        }
         condition.lock()
         closeComplete = true
         condition.broadcast()
@@ -260,7 +313,7 @@ final class TailingConnection: @unchecked Sendable {
         do {
             while true {
                 let socket = try tracked(server.accept(remoteIP: targetIP))
-                if isZeeho { log("极核 TCP\(port) 已回连") }
+                if isZeeho { log("极核 TCP\(port) 已回连（来自 \(targetIP)）") }
                 if port == ports.video {
                     condition.lock()
                     if video == nil && !closed { video = socket; condition.broadcast() }
@@ -290,6 +343,13 @@ final class TailingConnection: @unchecked Sendable {
             let request = try TailingProtocol.readControl { count in
                 defer { readingHeader = false }
                 return try socket.readExactly(count, waitForFirstByte: readingHeader)
+            }
+            let occurrence = (commandCounts[request.command] ?? 0) + 1
+            commandCounts[request.command] = occurrence
+            if occurrence <= 3 || occurrence % 50 == 0 || request.command == 0x10010 || request.command == 0x103e0 {
+                log(String(format: "%@ 控制请求 0x%08x（id=%d，%d 字节，第 %d 次）", dashboard, request.command,
+                           request.identifier, request.payload.count, occurrence)
+                    + (request.payload.isEmpty ? "" : "｜\(textPreview(request.payload))"))
             }
             var payload = Data()
             switch request.command {
@@ -419,6 +479,13 @@ final class TailingConnection: @unchecked Sendable {
                 defer { readingHeader = false }
                 return try socket.readExactly(count, waitForFirstByte: readingHeader)
             }
+            let occurrence = (auxiliaryCounts[request.command] ?? 0) + 1
+            auxiliaryCounts[request.command] = occurrence
+            if occurrence <= 5 || occurrence % 50 == 0 {
+                log(String(format: "%@ 媒体控制请求 0x%02x（token=%u，%d 字节，第 %d 次）", dashboard, request.command,
+                           request.token, request.payload.count, occurrence)
+                    + (request.payload.isEmpty ? "" : "｜\(hexPreview(request.payload))"))
+            }
             var payload = Data()
             let response: UInt16
             switch request.command {
@@ -459,12 +526,13 @@ final class TailingConnection: @unchecked Sendable {
                     condition.lock(); instrumentSize = (replyWidth, replyHeight); condition.unlock()
                 }
                 condition.lock(); configured = true; condition.unlock()
-                log("媒体身份回显校验通过，仪表报告 \(width)×\(height)，回应 \(isZeeho ? "H.264" : "JPEG") / \(replyWidth)×\(replyHeight)")
+                log("媒体身份回显校验通过，仪表报告 \(width)×\(height)，回应 \(isZeeho ? "H.264" : "JPEG") / \(replyWidth)×\(replyHeight)，回包 \(hexPreview(payload))")
             case 0x70:
                 condition.lock(); let ready = configured; condition.unlock()
                 guard ready else { throw TailingError.protocolFailure("仪表在配置完成前请求媒体启动") }
                 try socket.write(TailingProtocol.auxiliary(0x71, token: request.token))
                 condition.lock(); mediaStarted = true; condition.broadcast(); condition.unlock()
+                log("\(dashboard) 仪表请求启动媒体（0x70），已回应 0x71")
                 continue
             case 0x40: response = 0x41
             case 0x30:
@@ -490,6 +558,9 @@ final class TailingConnection: @unchecked Sendable {
         let shouldFail = !closed && failure == nil
         if shouldFail { failure = error }
         condition.unlock()
-        if shouldFail { close() }
+        if shouldFail {
+            log("\(dashboard) 会话失败：\(error.localizedDescription)")
+            close()
+        }
     }
 }

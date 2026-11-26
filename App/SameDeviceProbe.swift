@@ -19,6 +19,10 @@ final class SameDeviceProbe {
     private var requested = false
     private var controlConnected = false
     private var expectsLocalControl = true
+    private var sessionRequests = 0
+    private var packetsReceived = 0
+    private var messagesReceived = 0
+    private var startedAt = DispatchTime.now()
     var onLog: ((String) -> Void)?
     var onFinished: ((String) -> Void)?
     var onStage: ((String) -> Void)?
@@ -26,6 +30,12 @@ final class SameDeviceProbe {
     func start(configuration: ReceiverConfiguration, identity: AccessoryIdentity, expectsLocalControl: Bool = true) {
         stop(); active = true; self.identity = identity; self.configuration = configuration
         self.expectsLocalControl = expectsLocalControl
+        startedAt = .now()
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        let wifi = configuration.ssid.isEmpty ? "Wi-Fi 未填写"
+            : "Wi-Fi \(configuration.ssid)/信道 \(configuration.wifiChannel)/\(configuration.password.isEmpty ? "开放网络" : "密码 \(configuration.password.utf8.count) 字节")"
+        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 2 · 期望控制连接=\(expectsLocalControl)")
+        if !AppLog.localCarPlaySupport.supported { onLog?("警告：\(AppLog.localCarPlaySupport.summary)") }
         let run = generation
         transport.onData = { [weak self] data in self?.receive(data) }
         do {
@@ -43,11 +53,16 @@ final class SameDeviceProbe {
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
                 guard let self, self.active, self.generation == run, !self.requested else { return }
-                self.finish("会话启动超时（链路=\(self.linked)，认证=\(self.authenticated)，识别=\(self.identified)）")
+                self.finish("会话启动超时（链路=\(self.linked)，认证=\(self.authenticated)，识别=\(self.identified)，已收 \(self.packetsReceived) 个 iAP2 包/\(self.messagesReceived) 条消息）")
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 45) { [weak self] in
                 guard let self, self.active, self.generation == run, self.expectsLocalControl, !self.controlConnected else { return }
-                self.finish("未收到 CarPlay 控制连接，请检查 Wi-Fi 名称和密码后重试。兼容信道通常可保持默认值。")
+                let support = AppLog.localCarPlaySupport
+                if !support.supported {
+                    self.finish("未收到 CarPlay 控制连接：\(support.summary)。已发送 \(self.sessionRequests) 次 0x4301 启动请求，等待 45 秒仍无 TCP 回连——这是系统版本限制，检查 Wi-Fi 参数无法解决。请在 iOS 16.0–16.6.1 设备上测试本机 CarPlay。")
+                } else {
+                    self.finish("未收到 CarPlay 控制连接（已发送 \(self.sessionRequests) 次 0x4301，等待 45 秒），请检查 Wi-Fi 名称和密码后重试。兼容信道通常可保持默认值。")
+                }
             }
         } catch { finish("本机传输失败：\(error.localizedDescription)") }
     }
@@ -55,6 +70,7 @@ final class SameDeviceProbe {
         active = false; generation = UUID(); transport.stop(); transport.onData = nil; parser = IAP2Parser()
         identity = nil; configuration = nil; messageBytes = Data(); sequence = 0x10; acknowledgement = 0
         session = 1; lastPayloadSequence = nil; linked = false; authenticated = false; identified = false; requested = false; controlConnected = false
+        sessionRequests = 0; packetsReceived = 0; messagesReceived = 0; startedAt = .now()
     }
     func didConnectControl() {
         guard active else { return }
@@ -63,19 +79,30 @@ final class SameDeviceProbe {
     }
     private func requestSession(_ configuration: ReceiverConfiguration) throws {
         let wifi = try AccessoryMessages.WiFi(ssid: configuration.ssid, password: configuration.password, channel: configuration.wifiChannel)
+        sessionRequests += 1
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt.uptimeNanoseconds) / 1_000_000_000
+        onLog?(String(format: "第 %d 次发送 0x4301 启动 CarPlay（启动后 %.1f 秒）：目标 %@:%d，Wi-Fi %@（信道 %d，%@），标识 %@，认证=%@，识别=%@",
+            sessionRequests, elapsed, configuration.address, Int(configuration.port), wifi.ssid, Int(wifi.channel),
+            wifi.password.isEmpty ? "开放" : "密码 \(wifi.password.utf8.count) 字节",
+            configuration.deviceID, authenticated ? "是" : "否", identified ? "是" : "否"))
         try send(AccessoryMessages.startSession(address: configuration.address, port: configuration.port,
             deviceID: configuration.deviceID, wifi: wifi))
     }
     private func stage(_ message: String) { onLog?(message); onStage?(message) }
-    private func finish(_ message: String) { onLog?(message); stop(); onFinished?(message) }
+    private func finish(_ message: String) {
+        onLog?(message)
+        onLog?("本机 iAP2 会话结束：收到 \(packetsReceived) 个包、\(messagesReceived) 条消息，发送 0x4301 共 \(sessionRequests) 次")
+        stop(); onFinished?(message)
+    }
     private func ack() throws {
         try transport.send(IAP2Packet(control: 0x40, sequence: sequence, acknowledgement: acknowledgement, session: 0).encoded())
     }
     private func send(_ message: IAP2Message) throws {
         sequence &+= 1
+        let payload = try message.encoded()
         try transport.send(IAP2Packet(control: 0x40, sequence: sequence, acknowledgement: acknowledgement,
-            session: session, payload: message.encoded()).encoded())
-        onLog?(String(format: "发送 iAP2 消息 0x%04X", message.id))
+            session: session, payload: payload).encoded())
+        onLog?(String(format: "发送 iAP2 消息 0x%04X（%d 个参数，%d 字节，seq=%d）", message.id, message.parameters.count, payload.count, Int(sequence)))
     }
     private func receive(_ data: Data) {
         guard active else { return }
@@ -84,6 +111,13 @@ final class SameDeviceProbe {
                 switch event {
                 case .presence: onLog?("本机 iOS 服务已响应 iAP2 在线探测")
                 case .packet(let packet):
+                    packetsReceived += 1
+                    // 握手期数据量很小；长会话只记录前 200 个包，避免日志膨胀。
+                    if packetsReceived <= 200 {
+                        onLog?(String(format: "iAP2 收到包 #%d：control=0x%02X seq=%d ack=%d session=%d 载荷=%d 字节",
+                            packetsReceived, Int(packet.control), Int(packet.sequence), Int(packet.acknowledgement),
+                            Int(packet.session), packet.payload.count))
+                    }
                     acknowledgement = packet.sequence
                     if packet.control & 0x20 != 0 { throw ProtocolError.malformed("iOS 重置了 iAP2 链路") }
                     if packet.control & 0x80 != 0 {
@@ -113,7 +147,9 @@ final class SameDeviceProbe {
     }
     private func handle(_ message: IAP2Message) throws {
         guard let identity, let configuration else { return }
-        onLog?(String(format: "收到 iAP2 消息 0x%04X", message.id))
+        messagesReceived += 1
+        let bytes = message.parameters.reduce(0) { $0 + $1.value.count }
+        onLog?(String(format: "收到 iAP2 消息 0x%04X（%d 个参数，载荷合计 %d 字节）", message.id, message.parameters.count, bytes))
         switch message.id {
         case 0xaa00:
             try send(IAP2Message(id: 0xaa01, parameters: [IAP2Parameter(id: 0, value: identity.certificateChain)]))
@@ -132,10 +168,14 @@ final class SameDeviceProbe {
             for group in message.parameters {
                 let nested = try IAP2Parameter.parse(group.value)
                 if let value = nested.first(where: { $0.id == 0 })?.value.first {
-                    onLog?("CarPlay 可用传输 \(group.id)：\(value)")
+                    let fields = nested.map { "\($0.id)=\($0.value.count)B" }.joined(separator: ",")
+                    onLog?("CarPlay 可用传输 \(group.id)：type=\(value)（\(fields)）")
                 }
             }
-            if controlConnected || (!expectsLocalControl && requested) { return }
+            if controlConnected || (!expectsLocalControl && requested) {
+                onLog?("0x4300：已有控制连接或已请求过会话，跳过重复 0x4301（控制连接=\(controlConnected)）")
+                return
+            }
             try requestSession(configuration)
             if !requested && expectsLocalControl {
                 let run = generation
