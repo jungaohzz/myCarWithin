@@ -8,7 +8,8 @@ struct TailingDisplayProfile {
     let acceptsReportedSize: Bool
     static let tailing43 = TailingDisplayProfile(width: 480, height: 272, isZeeho: false, fps: 15, acceptsReportedSize: false)
     static let zeeho62 = TailingDisplayProfile(width: 1024, height: 480, isZeeho: true, fps: 25, acceptsReportedSize: false)
-    static let zeehoAE2 = TailingDisplayProfile(width: 960, height: 480, isZeeho: true, fps: 60, acceptsReportedSize: true)
+    // Same defaults as the reference AE2 entry: 1024×480 source, 30 FPS H.264 transcode.
+    static let zeehoAE2 = TailingDisplayProfile(width: 1024, height: 480, isZeeho: true, fps: 30, acceptsReportedSize: true)
 }
 
 import Foundation
@@ -429,7 +430,7 @@ final class TailingConnection: @unchecked Sendable {
                 // zeeho62 is verified against the 6.2-inch panel; the AE2 5-inch reports its
                 // own size, so accept any sane instrument-reported panel and follow it.
                 let validDimensions = profile.acceptsReportedSize
-                    ? width >= 320 && width <= 1920 && height >= 240 && height <= 1080
+                    ? width >= 240 && width <= 1920 && height >= 240 && height <= 1080
                     : isZeeho ? width == 1024 && (height == 480 || height == 488)
                     : width == 480 && height == 272
                 guard validDimensions else {

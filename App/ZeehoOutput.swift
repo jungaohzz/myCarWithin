@@ -126,12 +126,12 @@ final class ZeehoOutput {
                             guard let recovered else { throw TailingError.timeout("等待 H.264 编码画面") }
                             try connection.sendH264(recovered.data)
                             first = false
-                            report("正在投屏 · \(width)×\(height) · H.264\(fps >= 50 ? " · 60 FPS" : "")")
+                            report("正在投屏 · \(width)×\(height) · H.264 · \(fps) FPS")
                             continue
                         }
                         try connection.sendH264(result.data)
                         first = false
-                        report("正在投屏 · \(width)×\(height) · H.264\(fps >= 50 ? " · 60 FPS" : "")")
+                        report("正在投屏 · \(width)×\(height) · H.264 · \(fps) FPS")
                     }
                 } catch {
                     if active {
@@ -222,7 +222,7 @@ final class ZeehoOutput {
                     guard now - lastCodecFailure >= 0.5 else { return nil }
                     let (targetWidth, targetHeight) = locked { (width, height) }
                     encoder = try H264Encoder(width: targetWidth, height: targetHeight,
-                                              fps: fps, bitrate: fps >= 50 ? 4_000_000 : 2_500_000) { [weak self] result in
+                                              fps: fps, bitrate: 2_500_000 * fps / 25) { [weak self] result in
                         guard let self else { return }
                         self.locked { self.encoded = result }
                     }

@@ -779,9 +779,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         if outputMode == .zeehoAE2 {
             let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
-            // CarPlay requires at least 320 per side; 960×480 keeps 2× headroom for the
-            // 480-level panel and the output stage downsamples to the reported size.
-            return DisplayPlan(width: 960, height: 480, fps: 60, codec: .h264, iconWidthMM: icon)
+            // Same plan as the reference AE2 entry; the output stage re-scales to the panel size
+            // the instrument reports during media negotiation.
+            return DisplayPlan(width: 1024, height: 480, fps: 30, codec: .h264, iconWidthMM: icon)
         }
         if outputMode == .ninebot {
             let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
@@ -2378,9 +2378,9 @@ extension ReceiverViewController {
             }
             if outputMode == .zeehoAE2 {
                 return [
-                    SettingsSection("极核 AE2 5 寸", footer: "画面尺寸按仪表上报的面板参数自动适配，帧率跟随仪表最高 60 FPS。", [
-                        .info("仪表画面", "按仪表上报 · H.264 · 最高 60 FPS"),
-                        .info("本机 CarPlay", "960×480 · H.264 · 60 FPS")
+                    SettingsSection("极核 AE2 5 寸", footer: "画面尺寸按仪表上报的面板参数自动适配，H.264 转码 30 FPS。", [
+                        .info("仪表画面", "按仪表上报 · H.264 · 30 FPS"),
+                        .info("本机 CarPlay", "1024×480 · H.264 · 30 FPS")
                     ]),
                     SettingsSection("图标", [.control("CarPlay 图标大小", icon: ("square.grid.2x2.fill", .systemPurple), iconSizeControl)])
                 ]
@@ -2742,7 +2742,7 @@ extension ReceiverViewController {
                     .note(zeehoStatus)
                 ])]
             case .zeehoAE2:
-                return [SettingsSection("极核 AE2 5 寸（如 AE2 Pro）", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。自动查找会扫描当前 Wi-Fi 网段（约几秒）；关闭后可填写仪表实际 IP。画面尺寸与帧率按仪表上报自动适配（最高 60 FPS）。声音由 iPhone 或蓝牙输出。", [
+                return [SettingsSection("极核 AE2 5 寸（如 AE2 Pro）", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。自动查找会扫描当前 Wi-Fi 网段（约几秒）；关闭后可填写仪表实际 IP。画面尺寸跟随仪表上报值自动适配，H.264 转码 30 FPS。声音由 iPhone 或蓝牙输出。", [
                     .control("自动查找仪表 IP", icon: ("network", .systemBlue), zeehoAutomaticSwitch),
                     .field("仪表 IP 地址", zeehoAddressField, placeholder: "192.168.0.1"),
                     .note(zeehoStatus)
