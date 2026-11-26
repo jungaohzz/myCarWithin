@@ -21,6 +21,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let nameField = UITextField()
     private let ipField = UITextField()
     private let ssidField = UITextField()
+    private let wifiNameSource = ChoiceMenu(items: ["自动识别wifi", "手动输入wifi"])
     private let passwordField = UITextField()
     private var passwordLoadedForSSID: String?
     private let channelField = UITextField()
@@ -74,6 +75,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var activeWiFiForm: UUID?
     private var fetchingNetwork = false
     private var canDetectWiFiName: Bool { (Bundle.main.object(forInfoDictionaryKey: "TDSWiFiNameDetection") as? String) == "YES" }
+    private var autoDetectWiFiName: Bool { canDetectWiFiName && wifiNameSource.selectedSegmentIndex == 0 }
     /// The settings sheet while it is shown.
     private weak var settingsNavigation: UINavigationController?
     private let transportProbeButton = UIButton(type: .system)
@@ -301,6 +303,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         ssidField.text = selectedPreset?.ssid ?? UserDefaults.standard.string(forKey: "wifiSSID")
         ssidField.addTarget(self, action: #selector(networkNameChanged), for: .editingChanged)
         ssidField.addTarget(self, action: #selector(loadWiFiPassword), for: .editingDidEnd)
+        wifiNameSource.selectedSegmentIndex = min(max(
+            UserDefaults.standard.object(forKey: "wifiNameSource") as? Int ?? 0, 0), wifiNameSource.numberOfSegments - 1)
+        wifiNameSource.addTarget(self, action: #selector(wifiNameSourceChanged), for: .valueChanged)
         channelField.text = String(Int(selectedPreset?.channel ?? UInt8(UserDefaults.standard.object(forKey: "wifiChannel") as? Int ?? 36)))
         openNetworkSwitch.isOn = selectedPreset?.isOpen ?? false
         channelField.keyboardType = .numberPad
@@ -1255,6 +1260,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
     }
     @objc private func detectNetwork() { refreshCurrentNetwork(requestPermission: true) }
+    @objc private func wifiNameSourceChanged() {
+        UserDefaults.standard.set(wifiNameSource.selectedSegmentIndex, forKey: "wifiNameSource")
+        if autoDetectWiFiName, !running { detectNetwork() }
+        reloadVisibleSettings()
+    }
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         guard awaitingNetworkPermission, manager.authorizationStatus != .notDetermined else { return }
         awaitingNetworkPermission = false
@@ -1262,7 +1272,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         refreshCurrentNetwork(requestPermission: true)
     }
     private func refreshCurrentNetwork(requestPermission: Bool) {
-        guard canDetectWiFiName, !running, !waitingForNetwork, !fetchingNetwork, needsNetworkDetails,
+        guard autoDetectWiFiName, !running, !waitingForNetwork, !fetchingNetwork, needsNetworkDetails,
               requestPermission || (activeWiFiForm == nil && (ssidField.text ?? "").isEmpty) else { return }
         let authorization = locationManager.authorizationStatus
         if authorization == .notDetermined, requestPermission {
@@ -2469,7 +2479,10 @@ extension ReceiverViewController {
         let controller = page(title) { [unowned self] in
             var current: [SettingsRow] = []
             if canDetectWiFiName && editable {
-                current.append(.action("读取当前 Wi-Fi", icon: ("antenna.radiowaves.left.and.right", .systemBlue)) { [unowned self] in
+                current.append(.control("Wi-Fi 名称来源", icon: ("antenna.radiowaves.left.and.right", .systemBlue), wifiNameSource))
+            }
+            if autoDetectWiFiName && editable {
+                current.append(.action("重新识别当前 Wi-Fi", icon: ("arrow.clockwise", .systemBlue)) { [unowned self] in
                     guard !self.running else { return }
                     self.detectNetwork()
                 })
@@ -2495,6 +2508,12 @@ extension ReceiverViewController {
             sections.append(SettingsSection(footer: editingLockedFooter ?? "返回自动保存。同名网络会更新原预设，兼容信道通常保持 36。", fields))
             if editable, passwordStatus.text?.isEmpty == false { sections.append(SettingsSection([.note(passwordStatus)])) }
             return sections
+        }
+        if editable, autoDetectWiFiName {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.activeWiFiForm == form, !self.running else { return }
+                self.detectNetwork()
+            }
         }
         controller.onLeave = { [weak self] in
             guard let self, self.activeWiFiForm == form else { return }
