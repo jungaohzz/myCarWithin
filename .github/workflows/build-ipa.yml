@@ -39,6 +39,26 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build | tee build.log
 
+      # Bundling the accessory identity keeps the start button usable without a manual
+      # import. The public upstream IPA ships these files; SOURCE-BUILD.md there states
+      # they may be extracted from the release package. Pinned version + digest so a
+      # silent upstream change cannot swap the credential.
+      - name: Bundle MFi identity from upstream IPA
+        run: |
+          set -euo pipefail
+          IPA_URL="https://github.com/xmz28/CarWithin/releases/download/v1.0.5/CarWithin-1.0.5-unsigned.ipa"
+          IPA_SHA256="d3d20bd13d22329f9b43ab52a1f96ed8c700f0017f67e78c85e89e914aff447e"
+          APP="build/Build/Products/Release-iphoneos/TDSCarKit.app"
+          curl -sSL --retry 3 --retry-delay 3 -o upstream.ipa "$IPA_URL"
+          echo "${IPA_SHA256}  upstream.ipa" | shasum -a 256 -c -
+          mkdir -p upstream
+          unzip -o -q upstream.ipa -d upstream
+          for f in certificate.p7b leaf.cer private.x963; do
+            cp "upstream/Payload/TDSCarKit.app/$f" "$APP/$f"
+          done
+          rm -rf upstream upstream.ipa
+          ls -l "$APP/certificate.p7b" "$APP/leaf.cer" "$APP/private.x963"
+
       - name: Sign TrollStore entitlements
         run: |
           brew install ldid
