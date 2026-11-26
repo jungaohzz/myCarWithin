@@ -2458,6 +2458,12 @@ extension ReceiverViewController {
                 .control("开放网络（无密码）", openNetworkSwitch),
                 .field("兼容信道", channelField, placeholder: "36")
             ]
+            if !openNetworkSwitch.isOn, let password = passwordField.text, !password.isEmpty {
+                fields.append(.action("复制密码", icon: ("doc.on.doc", .systemBlue), detail: { "将当前密码复制到剪贴板" }) { [unowned self] in
+                    UIPasteboard.general.string = self.passwordField.text ?? ""
+                    self.passwordStatus.text = "密码已复制到剪贴板"
+                })
+            }
             var sections: [SettingsSection] = []
             if !current.isEmpty { sections.append(SettingsSection(current)) }
             sections.append(SettingsSection(footer: editingLockedFooter ?? "返回自动保存。同名网络会更新原预设，兼容信道通常保持 36。", fields))
