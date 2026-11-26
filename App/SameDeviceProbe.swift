@@ -22,8 +22,14 @@ final class SameDeviceProbe {
     private var sessionRequests = 0
     private var packetsReceived = 0
     private var messagesReceived = 0
+    private var chunksReceived = 0
     private var startedAt = DispatchTime.now()
     var onLog: ((String) -> Void)?
+
+    private func hexPreview(_ data: Data, limit: Int = 96) -> String {
+        let text = data.prefix(limit).map { String(format: "%02X", $0) }.joined(separator: " ")
+        return data.count > limit ? "\(text) …（共 \(data.count) 字节）" : text
+    }
     var onFinished: ((String) -> Void)?
     var onStage: ((String) -> Void)?
 
@@ -70,7 +76,7 @@ final class SameDeviceProbe {
         active = false; generation = UUID(); transport.stop(); transport.onData = nil; parser = IAP2Parser()
         identity = nil; configuration = nil; messageBytes = Data(); sequence = 0x10; acknowledgement = 0
         session = 1; lastPayloadSequence = nil; linked = false; authenticated = false; identified = false; requested = false; controlConnected = false
-        sessionRequests = 0; packetsReceived = 0; messagesReceived = 0; startedAt = .now()
+        sessionRequests = 0; packetsReceived = 0; messagesReceived = 0; chunksReceived = 0; startedAt = .now()
     }
     func didConnectControl() {
         guard active else { return }
@@ -100,23 +106,33 @@ final class SameDeviceProbe {
     private func send(_ message: IAP2Message) throws {
         sequence &+= 1
         let payload = try message.encoded()
+        let fields = message.parameters
+            .map { "\($0.id)=\($0.value.count)B" }
+            .joined(separator: "，")
+        // 0x4301 含 Wi-Fi 密码，只记录字段结构不打印十六进制内容。
+        let content = message.id == 0x4301 ? "（含 Wi-Fi 凭据，不打印内容）" : "：\(hexPreview(payload, limit: 320))"
+        onLog?(String(format: "发送 iAP2 消息 0x%04X（%d 个参数\(fields.isEmpty ? "" : "：\(fields)")，%d 字节，seq=%d）%@",
+                      message.id, message.parameters.count, payload.count, Int(sequence), content))
         try transport.send(IAP2Packet(control: 0x40, sequence: sequence, acknowledgement: acknowledgement,
             session: session, payload: payload).encoded())
-        onLog?(String(format: "发送 iAP2 消息 0x%04X（%d 个参数，%d 字节，seq=%d）", message.id, message.parameters.count, payload.count, Int(sequence)))
     }
     private func receive(_ data: Data) {
         guard active else { return }
         do {
+            chunksReceived += 1
+            if chunksReceived <= 400 {
+                onLog?(String(format: "iAP2 原始数据块 #%d：%d 字节：%@", chunksReceived, data.count, hexPreview(data, limit: 48)))
+            }
             for event in try parser.append(data) {
                 switch event {
                 case .presence: onLog?("本机 iOS 服务已响应 iAP2 在线探测")
                 case .packet(let packet):
                     packetsReceived += 1
-                    // 握手期数据量很小；长会话只记录前 200 个包，避免日志膨胀。
-                    if packetsReceived <= 200 {
-                        onLog?(String(format: "iAP2 收到包 #%d：control=0x%02X seq=%d ack=%d session=%d 载荷=%d 字节",
+                    // 握手期数据量很小；长会话只记录前 400 个包，避免日志膨胀。
+                    if packetsReceived <= 400 {
+                        onLog?(String(format: "iAP2 收到包 #%d：control=0x%02X seq=%d ack=%d session=%d 载荷=%d 字节：%@",
                             packetsReceived, Int(packet.control), Int(packet.sequence), Int(packet.acknowledgement),
-                            Int(packet.session), packet.payload.count))
+                            Int(packet.session), packet.payload.count, hexPreview(packet.payload, limit: 96)))
                     }
                     acknowledgement = packet.sequence
                     if packet.control & 0x20 != 0 { throw ProtocolError.malformed("iOS 重置了 iAP2 链路") }
@@ -150,6 +166,12 @@ final class SameDeviceProbe {
         messagesReceived += 1
         let bytes = message.parameters.reduce(0) { $0 + $1.value.count }
         onLog?(String(format: "收到 iAP2 消息 0x%04X（%d 个参数，载荷合计 %d 字节）", message.id, message.parameters.count, bytes))
+        if messagesReceived <= 300 {
+            for parameter in message.parameters {
+                onLog?(String(format: "  参数 %d（0x%04X）：%d 字节 %@", parameter.id, parameter.id,
+                              parameter.value.count, hexPreview(parameter.value, limit: 64)))
+            }
+        }
         switch message.id {
         case 0xaa00:
             try send(IAP2Message(id: 0xaa01, parameters: [IAP2Parameter(id: 0, value: identity.certificateChain)]))
@@ -168,7 +190,8 @@ final class SameDeviceProbe {
             for group in message.parameters {
                 let nested = try IAP2Parameter.parse(group.value)
                 if let value = nested.first(where: { $0.id == 0 })?.value.first {
-                    let fields = nested.map { "\($0.id)=\($0.value.count)B" }.joined(separator: ",")
+                    let fields = nested.map { "\($0.id)=\($0.value.count)字节/\(hexPreview($0.value, limit: 32))" }
+                        .joined(separator: "；")
                     onLog?("CarPlay 可用传输 \(group.id)：type=\(value)（\(fields)）")
                 }
             }

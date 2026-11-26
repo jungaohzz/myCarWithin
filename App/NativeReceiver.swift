@@ -51,6 +51,14 @@ final class NativeReceiver {
     private var statsFrames = 0
     private var statsBytes = 0
     private var statsKeyframes = 0
+    private var totalFrames = 0
+    private var frameSamples = 0
+    private var heartbeatTimer: DispatchSourceTimer?
+
+    private static func hexPreview(_ data: Data, limit: Int) -> String {
+        let text = data.prefix(limit).map { String(format: "%02X", $0) }.joined(separator: " ")
+        return data.count > limit ? "\(text) …（共 \(data.count) 字节）" : text
+    }
     private var airPlayIdentity: AirPlayCredentials?
     private let videoOutput = VideoOutputServer()
     private let carLife = CarLifeOutput()
@@ -85,6 +93,19 @@ final class NativeReceiver {
         queue.async { [weak self] in
             guard let self else { return }
             self.stopOnQueue()
+            // 10 秒心跳：即使 CarPlay 一直不回连，日志也每 10 秒出现一行证明监听器存活、连接数变化。
+            let heartbeat = DispatchSource.makeTimerSource(queue: self.queue)
+            heartbeat.schedule(deadline: .now() + 10, repeating: 10)
+            var beats = 0
+            heartbeat.setEventHandler { [weak self] in
+                guard let self else { return }
+                beats += 1
+                let media = self.sessions.values.compactMap { $0.media }
+                let eventInfo = "事件通道 \(media.filter { $0.hasEventChannel }.count)/\(media.count)"
+                self.log("接收器心跳 #\(beats)：TCP 连接 \(self.connections.count) 个，会话 \(self.sessions.count) 个，\(eventInfo)，累计视频帧 \(self.totalFrames)，本地队列 \(self.localInFlight)，关键帧请求 \(self.keyframeAttempts) 次")
+            }
+            heartbeat.resume()
+            self.heartbeatTimer = heartbeat
             self.videoOutput.onLog = { [weak self] in self?.log($0) }
             self.videoOutput.onAirPlayReady = { [weak self] id in
                 DispatchQueue.main.async { [weak self] in self?.onAirPlayReady?(id) }
@@ -356,9 +377,11 @@ final class NativeReceiver {
         diagnosticGap = 0; diagnosticWork = 0; diagnosticMainDelay = 0; diagnosticMainWork = 0
         #endif
         localSkipping = false; keyframeWantedSince = nil; keyframeLastSent = nil; keyframeAttempts = 0
+        heartbeatTimer?.cancel(); heartbeatTimer = nil
         receivedFirstVideoFrame = false
         statsStarted = ProcessInfo.processInfo.systemUptime; sessionStarted = statsStarted
         statsFrames = 0; statsBytes = 0; statsKeyframes = 0
+        totalFrames = 0; frameSamples = 0
         touchSlots.reset()
         for connection in connections.values { connection.cancel() }
         connections.removeAll()
@@ -393,7 +416,8 @@ final class NativeReceiver {
                     while true {
                         let plaintext = try state.cipher?.receive(input) ?? input
                         guard let request = try state.parser.append(plaintext, maximumRequests: 1).first else { break }
-                        self.log("\(request.method) \(request.target.prefix(100)) [\(request.body.count) 字节] ← \(state.peerAddress)\(state.cipher != nil ? "（加密）" : "")")
+                        let headerNames = request.headers.keys.sorted().joined(separator: ",")
+                        self.log("\(request.method) \(request.target.prefix(100)) [\(request.body.count) 字节，头 \(request.headers.count) 个：\(headerNames)] ← \(state.peerAddress)\(state.cipher != nil ? "（加密）" : "")")
                         let response = try self.respond(request, state: state, configuration: configuration, identity: identity)
                         let encoded = response.encoded(for: request)
                         let wire = try state.cipher?.encrypt(encoded) ?? encoded
@@ -446,6 +470,11 @@ final class NativeReceiver {
                     if !self.receivedFirstVideoFrame {
                         self.receivedFirstVideoFrame = true
                         self.log("已收到第一帧 CarPlay 视频（\(codec.displayName)，\(data.count) 字节，关键帧=\(keyframe)）")
+                    }
+                    self.totalFrames += 1
+                    self.frameSamples += 1
+                    if self.frameSamples >= 2 && self.frameSamples <= 5 {
+                        self.log("视频帧样本 #\(self.frameSamples)：\(codec.displayName) \(data.count) 字节，关键帧=\(keyframe)，前 32 字节 \(Self.hexPreview(data, limit: 32))")
                     }
                     self.statsFrames += 1; self.statsBytes += data.count
                     if keyframe { self.statsKeyframes += 1 }

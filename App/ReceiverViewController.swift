@@ -713,6 +713,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         wifiPathMonitor.cancel()
         networkStartupTask?.cancel()
     }
+    override func didReceiveMemoryWarning() {
+        super.didReceiveMemoryWarning()
+        log("[系统] 收到内存警告，iOS 可能随后挂起或杀掉 App（状态：运行=\(running)，画中画=\(pictureInPicture.isActive)，后台保持=\(keepAlive.isRunning)）")
+    }
 
     /// Presets are listed on their own settings page; refresh it if it is open.
     private func refreshWiFiPresetMenu() { reloadVisibleSettings() }
@@ -1337,7 +1341,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                     self.log("当前 Wi-Fi：无法读取 SSID（需要定位权限）；预设 \(configured.isEmpty ? "未填写" : configured)")
                     return
                 }
-                self.log("当前 Wi-Fi：\(network.ssid)（\(network.isSecure ? "加密" : "开放")）；预设 \(configured.isEmpty ? "未填写" : configured)\(network.ssid == configured ? "，一致" : "，不一致：0x4301 将使用预设值")")
+                self.log("当前 Wi-Fi：\(network.ssid)（BSSID \(network.bssid)，\(network.isSecure ? "加密" : "开放")）；预设 \(configured.isEmpty ? "未填写" : configured)\(network.ssid == configured ? "，一致" : "，不一致：0x4301 将使用预设值")")
             }
         }
     }

@@ -2,6 +2,52 @@ import Darwin
 import Foundation
 import UIKit
 
+/// Crash evidence: the raw descriptor of the current log file, kept in sync by AppLog.open().
+/// Signal handlers may only use async-signal-safe calls, so the messages are pre-encoded
+/// with strdup before any handler can fire and written with write(2).
+private var appLogCrashFD: Int32 = -1
+private var appLogAbortPointer: UnsafeMutablePointer<CChar>?
+private var appLogAbortLength = 0
+private var appLogSegvPointer: UnsafeMutablePointer<CChar>?
+private var appLogSegvLength = 0
+private var appLogBusPointer: UnsafeMutablePointer<CChar>?
+private var appLogBusLength = 0
+private var appLogIllPointer: UnsafeMutablePointer<CChar>?
+private var appLogIllLength = 0
+private var appLogFpePointer: UnsafeMutablePointer<CChar>?
+private var appLogFpeLength = 0
+private var appLogTrapPointer: UnsafeMutablePointer<CChar>?
+private var appLogTrapLength = 0
+
+private func appLogStash(_ text: String) -> (UnsafeMutablePointer<CChar>?, Int) {
+    guard let pointer = strdup(text) else { return (nil, 0) }
+    return (pointer, strlen(pointer))
+}
+
+private func appLogSignalDispatcher(_ signalNumber: Int32) {
+    var pointer: UnsafeMutablePointer<CChar>?
+    var length = 0
+    switch signalNumber {
+    case SIGABRT: pointer = appLogAbortPointer; length = appLogAbortLength
+    case SIGSEGV: pointer = appLogSegvPointer; length = appLogSegvLength
+    case SIGBUS: pointer = appLogBusPointer; length = appLogBusLength
+    case SIGILL: pointer = appLogIllPointer; length = appLogIllLength
+    case SIGFPE: pointer = appLogFpePointer; length = appLogFpeLength
+    case SIGTRAP: pointer = appLogTrapPointer; length = appLogTrapLength
+    default: break
+    }
+    if let pointer, length > 0, appLogCrashFD >= 0 {
+        _ = Darwin.write(appLogCrashFD, UnsafeRawPointer(pointer), length)
+    }
+    signal(signalNumber, SIG_DFL)
+    raise(signalNumber)
+}
+
+private func appLogUncaughtExceptionHandler(_ exception: NSException) {
+    AppLog.recordCrash("[崩溃] 未捕获异常 \(exception.name.rawValue)：\(exception.reason ?? "无原因")")
+    AppLog.recordCrash("[崩溃] 调用栈：\n" + exception.callStackSymbols.joined(separator: "\n"))
+}
+
 /// One plain-text log file per launch under Documents/Logs. Every line is timestamped and
 /// written immediately so a crash or a force-quit keeps the evidence. The files are listed,
 /// deleted and shared from the 日志 settings page.
@@ -11,6 +57,14 @@ final class AppLog: @unchecked Sendable {
     /// Called from any thread; the line is appended in arrival order.
     static func record(_ message: String) {
         shared.write(message)
+    }
+
+    /// Crash path: the uncaught handler runs right before the process dies, so the line must
+    /// reach the fd synchronously instead of riding the logging queue.
+    static func recordCrash(_ message: String) {
+        let stamp = shared.formatter.string(from: Date())
+        guard appLogCrashFD >= 0, let data = "\(stamp)  \(message)\n".data(using: .utf8) else { return }
+        data.withUnsafeBytes { _ = Darwin.write(appLogCrashFD, $0.baseAddress, $0.count) }
     }
 
     let directory: URL
@@ -36,10 +90,26 @@ final class AppLog: @unchecked Sendable {
         currentURL = directory.appendingPathComponent("CarWithin-\(stamp.string(from: Date())).txt")
         prune()
         open()
+        installCrashHandlers()
         write("App 启动 · \(AppLog.environmentSummary())")
         write("网络接口 · \(AppLog.interfaceSummary())")
         write("本机 CarPlay · \(AppLog.localCarPlaySupport.summary)")
         write("磁盘 · \(AppLog.storageSummary())")
+    }
+
+    /// 未捕获异常和致命信号（SIGABRT/SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGTRAP）也写进日志，
+    /// 私有接口导致的崩溃因此有据可查，不需要再猜是哪一步掉的。
+    private func installCrashHandlers() {
+        (appLogAbortPointer, appLogAbortLength) = appLogStash("\n!!! 进程收到 SIGABRT（异常中止）!!!\n")
+        (appLogSegvPointer, appLogSegvLength) = appLogStash("\n!!! 进程收到 SIGSEGV（访问非法内存）!!!\n")
+        (appLogBusPointer, appLogBusLength) = appLogStash("\n!!! 进程收到 SIGBUS（总线错误）!!!\n")
+        (appLogIllPointer, appLogIllLength) = appLogStash("\n!!! 进程收到 SIGILL（非法指令）!!!\n")
+        (appLogFpePointer, appLogFpeLength) = appLogStash("\n!!! 进程收到 SIGFPE（算术异常）!!!\n")
+        (appLogTrapPointer, appLogTrapLength) = appLogStash("\n!!! 进程收到 SIGTRAP（Swift 运行时陷阱）!!!\n")
+        for number in [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP] {
+            signal(number, appLogSignalDispatcher)
+        }
+        NSSetUncaughtExceptionHandler(appLogUncaughtExceptionHandler)
     }
 
     /// 本机 CarPlay（自建 iAP2 配件端点）从 iOS 16 起可用；参考项目 CarWithin 明确要求
@@ -77,7 +147,7 @@ final class AppLog: @unchecked Sendable {
     /// Deletes every file and starts a fresh one so sharing keeps working afterwards.
     func deleteAll() {
         queue.sync {
-            try? handle?.close(); handle = nil
+            try? handle?.close(); handle = nil; appLogCrashFD = -1
             let names = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
             names.forEach { try? FileManager.default.removeItem(at: $0) }
             currentURL = directory.appendingPathComponent("CarWithin-\(stampFormatter.string(from: Date())).txt")
@@ -89,7 +159,7 @@ final class AppLog: @unchecked Sendable {
     func delete(_ url: URL) {
         queue.sync {
             if url == currentURL {
-                try? handle?.close(); handle = nil
+                try? handle?.close(); handle = nil; appLogCrashFD = -1
                 try? FileManager.default.removeItem(at: url)
                 open()
                 return
@@ -101,6 +171,7 @@ final class AppLog: @unchecked Sendable {
     private func open() {
         _ = FileManager.default.createFile(atPath: currentURL.path, contents: nil)
         handle = try? FileHandle(forWritingTo: currentURL)
+        appLogCrashFD = handle?.fileDescriptor ?? -1
     }
 
     private func prune() {

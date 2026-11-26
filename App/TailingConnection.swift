@@ -133,10 +133,12 @@ final class TailingConnection: @unchecked Sendable {
         if let discoveredSocket { announcement = discoveredSocket }
         else { announcement = try openAnnouncement() }
         defer { announcement.close() }
-        try announcement.write(TailingProtocol.control(0x70000010, payload: TailingProtocol.json([
-            "phoneType": "iOS", "packageName": phone.package
-        ])))
+        let probe = TailingProtocol.json(["phoneType": "iOS", "packageName": phone.package])
+        log("\(dashboard) 10930 探测请求 0x70000010（\(probe.count) 字节）：\(textPreview(probe, limit: 200))")
+        try announcement.write(TailingProtocol.control(0x70000010, payload: probe))
         let reply = try TailingProtocol.readControl { try announcement.readExactly($0, timeout: 3) }
+        log(String(format: "%@ 10930 探测回复 0x%08x（%d 字节）：%@", dashboard, reply.command, reply.payload.count,
+                   textPreview(reply.payload, limit: 200)))
         guard reply.command == 0x70000011,
               try TailingProtocol.object(reply.payload)["status"] as? Bool == true else {
             throw TailingError.protocolFailure("仪表未接受 iOS 投屏请求")
@@ -349,7 +351,7 @@ final class TailingConnection: @unchecked Sendable {
             if occurrence <= 3 || occurrence % 50 == 0 || request.command == 0x10010 || request.command == 0x103e0 {
                 log(String(format: "%@ 控制请求 0x%08x（id=%d，%d 字节，第 %d 次）", dashboard, request.command,
                            request.identifier, request.payload.count, occurrence)
-                    + (request.payload.isEmpty ? "" : "｜\(textPreview(request.payload))"))
+                    + (request.payload.isEmpty ? "" : "｜\(textPreview(request.payload, limit: 400))｜HEX \(hexPreview(request.payload, limit: 256))"))
             }
             var payload = Data()
             switch request.command {
@@ -454,12 +456,15 @@ final class TailingConnection: @unchecked Sendable {
         // iOS 成功抓包中同屏状态只在启动时发送，反向连接随后用 0x70000000 保活。
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "com.hanlin.ninebotpro.tailing.status"))
         var identifier: UInt32 = isZeeho ? 7 : 6
+        var beats = 0
         timer.schedule(deadline: .now() + 2, repeating: 2)
         timer.setEventHandler { [weak self, weak socket] in
             guard let self, let socket else { return }
             do {
                 try socket.write(TailingProtocol.control(0x70000000, identifier: identifier))
                 identifier &+= 1
+                beats += 1
+                if beats % 30 == 0 { self.log("\(self.dashboard) 0x70000000 会话保活已发送 \(beats) 次（约 \(beats * 2) 秒）") }
             } catch { self.fail(TailingError.channel("发送会话保活", error)) }
         }
         condition.lock()
@@ -484,7 +489,7 @@ final class TailingConnection: @unchecked Sendable {
             if occurrence <= 5 || occurrence % 50 == 0 {
                 log(String(format: "%@ 媒体控制请求 0x%02x（token=%u，%d 字节，第 %d 次）", dashboard, request.command,
                            request.token, request.payload.count, occurrence)
-                    + (request.payload.isEmpty ? "" : "｜\(hexPreview(request.payload))"))
+                    + (request.payload.isEmpty ? "" : "｜\(hexPreview(request.payload, limit: 400))"))
             }
             var payload = Data()
             let response: UInt16
