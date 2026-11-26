@@ -43,6 +43,7 @@
 		4AD9E5E0E2567117436435D1 /* Sources/TDSCarKitCore/Vendor/BigInt/Bitwise Ops.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF752662F5CAF2EA82D4BA88 /* Sources/TDSCarKitCore/Vendor/BigInt/Bitwise Ops.swift */; };
 		4CE616E30E7A07ADE97D630E /* Sources/TDSCarKitCore/Vendor/BigInt/Prime Test.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77EA498A0CBD1F760370C8D4 /* Sources/TDSCarKitCore/Vendor/BigInt/Prime Test.swift */; };
 		4EC2B9A0957C0C7BA4C4D577 /* App/CarPlayControlBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A14BC9A1582FB7301EBA4EEC /* App/CarPlayControlBrowser.swift */; };
+		4F9C2B71E83A5D06B7C41E90 /* App/SystemWiFiPassword.swift in Sources */ = {isa = PBXBuildFile; fileRef = D06E3F91A5247B8C2E7A91F3 /* App/SystemWiFiPassword.swift */; };
 		4FC96E6A3FE1F6C1864D8385 /* Sources/TDSCarKitCore/AccessoryMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B44E63C988BDC4F5B5026B9 /* Sources/TDSCarKitCore/AccessoryMessages.swift */; };
 		64FA68787E3FF96C50ADFECA /* Sources/TDSCarKitCore/Vendor/BigInt/Codable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75E81123FE07B05287A2894B /* Sources/TDSCarKitCore/Vendor/BigInt/Codable.swift */; };
 		65EE858BFD0D425464E00224 /* App/CarLifeOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C241FB52D18614C66A83C76 /* App/CarLifeOutput.swift */; };
@@ -89,6 +90,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		D06E3F91A5247B8C2E7A91F3 /* App/SystemWiFiPassword.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/SystemWiFiPassword.swift; sourceTree = "<group>"; };
 		D69FD1F200ECE2D7FA951B51 /* App/TailingSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/TailingSocket.swift; sourceTree = "<group>"; };
 		E1742C549D25653794782E49 /* App/TailingProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/TailingProtocol.swift; sourceTree = "<group>"; };
 		15C6BB68729B79CB1589593B /* App/TailingOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/TailingOutput.swift; sourceTree = "<group>"; };
@@ -224,6 +226,7 @@
 				4B70235FFE972F257D61E968 /* App/ReceiverViewController.swift */,
 				6E16358245C1D6E4C9ECD5FA /* App/SameDeviceProbe.swift */,
 				B374C20AACA7AAE5D44C7088 /* App/SettingsUI.swift */,
+				D06E3F91A5247B8C2E7A91F3 /* App/SystemWiFiPassword.swift */,
 				24D25E3C50CC9A0575E5FF1D /* App/VideoOutputServer.swift */,
 				1E01738CFB87BC0126A2372B /* App/WiFiPresetStore.swift */,
 				D3F8C56D7B6DEA9C9CA53610 /* Sources/CTDSCarKitCrypto/TDSCarKitCrypto.c */,
@@ -377,6 +380,7 @@
 				E30B5264FB459950C8F64D8F /* App/ReceiverViewController.swift in Sources */,
 				317280AA587980E347998259 /* App/SameDeviceProbe.swift in Sources */,
 				A77236DFEF0F54D93D1A8A28 /* App/SettingsUI.swift in Sources */,
+				4F9C2B71E83A5D06B7C41E90 /* App/SystemWiFiPassword.swift in Sources */,
 				354330CE6A98B2498BB64931 /* App/VideoOutputServer.swift in Sources */,
 				7D5C38AAD75E95261497533A /* App/WiFiPresetStore.swift in Sources */,
 				A9DDBA2899C281474474D15B /* Sources/CTDSCarKitCrypto/TDSCarKitCrypto.c in Sources */,

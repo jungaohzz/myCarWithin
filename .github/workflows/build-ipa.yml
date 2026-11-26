@@ -26,6 +26,15 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build | tee build.log
 
+      - name: Sign TrollStore entitlements
+        run: |
+          brew install ldid
+          APP="build/Build/Products/Release-iphoneos/TDSCarKit.app"
+          ldid -Sdocs/support/TrollStore.entitlements "$APP/TDSCarKit"
+          find "$APP" -type f \( -name "*.dylib" -o -path "*/Frameworks/*" \) -print0 |
+            xargs -0 -I{} ldid -Sdocs/support/TrollStore.entitlements "{}" || true
+          ldid -e "$APP/TDSCarKit" | head -40
+
       - name: Package IPA
         run: |
           mkdir -p Payload

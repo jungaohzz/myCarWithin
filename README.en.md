@@ -63,7 +63,7 @@ These modes do not create an internet tunnel or guarantee access through a head 
 
 The top settings group includes User guide, Wi-Fi and network, Wi-Fi presets, Current output and Output settings. HTTPS settings appears when Browser output is selected.
 
-Enter Wi-Fi credentials and go back to save them automatically. Enable the open-network option for a network without a password. Each SSID has one preset; editing its password updates that preset. Tap a saved preset when changing networks. Swipe to delete, then confirm; this also removes its saved password. The Wi-Fi form no longer rebuilds repeatedly while typing, reducing input stalls.
+Enter Wi-Fi credentials and go back to save them automatically. Enable the open-network option for a network without a password. Each SSID has one preset; editing its password updates that preset. Tap a saved preset when changing networks. Swipe to delete, then confirm; this also removes its saved password. The Wi-Fi form no longer rebuilds repeatedly while typing, reducing input stalls. TrollStore builds carry the system keychain entitlement: for presets without a saved password, the app reads the password iOS stored when the iPhone joined that network, then keeps it as an app preset.
 
 Some connection settings are locked while CarPlay is running; stop the session before editing them. Appearance, driving side, and audio are available on the settings home page. Logs are under Diagnostics and experiments; versions and updates are under About.
 

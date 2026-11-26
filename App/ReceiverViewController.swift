@@ -1214,8 +1214,17 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             if let saved = try WiFiCredentials.password(for: ssid) {
                 passwordField.text = saved; openNetworkSwitch.isOn = saved.isEmpty
                 passwordStatus.text = "已读取保存的 Wi-Fi 配置"
+                return
             }
         } catch { passwordStatus.text = "无法读取已保存的密码，请重新输入。" }
+        // TrollStore builds can read the password iOS saved when joining this network;
+        // once found, keep a copy so it survives without the system keychain entitlement.
+        guard let system = SystemWiFiPassword.password(forSSID: ssid) else { return }
+        passwordField.text = system; openNetworkSwitch.isOn = system.isEmpty
+        passwordStatus.text = "已自动读取系统保存的 Wi-Fi 密码"
+        do { try WiFiCredentials.save(system, for: ssid) } catch {
+            passwordStatus.text = "已自动读取系统保存的 Wi-Fi 密码（保存到本 App 失败）"
+        }
     }
     private func refreshNetworkSummary() {
         let name = ssidField.text ?? ""
