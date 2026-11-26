@@ -102,11 +102,19 @@ final class ZeehoOutput {
                     }
                     report("仪表已连接，等待 CarPlay 画面…")
                     var first = true
+                    var lastNoFrameLog = 0.0
                     var nextFrame = ProcessInfo.processInfo.systemUptime
                     while active {
                         try connection.checkHealth()
                         let ready = queue.sync { latest != nil }
-                        if !ready { Thread.sleep(forTimeInterval: 0.05); continue }
+                        if !ready {
+                            let now = ProcessInfo.processInfo.systemUptime
+                            if now - lastNoFrameLog >= 5 {
+                                lastNoFrameLog = now
+                                onLog("极核等待 CarPlay 首帧：接收器仍无视频帧。CarPlay 会话未建立时仪表约 10 秒后关闭投屏会话")
+                            }
+                            Thread.sleep(forTimeInterval: 0.05); continue
+                        }
                         let remaining = nextFrame - ProcessInfo.processInfo.systemUptime
                         if remaining > 0 { Thread.sleep(forTimeInterval: min(remaining, 0.04)); continue }
                         try connection.waitForH264Request()

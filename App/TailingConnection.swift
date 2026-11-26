@@ -61,6 +61,7 @@ final class TailingConnection: @unchecked Sendable {
     private var reverseControl: TailingSocket?
     private var sentH264Prefix = false
     private var mediaStarted = false
+    private var mediaStartedAt: Date?
     private var configured = false
     private var instrumentSize: (width: Int, height: Int)?
     private var isZeeho: Bool { profile.isZeeho }
@@ -536,7 +537,7 @@ final class TailingConnection: @unchecked Sendable {
                 condition.lock(); let ready = configured; condition.unlock()
                 guard ready else { throw TailingError.protocolFailure("仪表在配置完成前请求媒体启动") }
                 try socket.write(TailingProtocol.auxiliary(0x71, token: request.token))
-                condition.lock(); mediaStarted = true; condition.broadcast(); condition.unlock()
+                condition.lock(); mediaStarted = true; mediaStartedAt = Date(); condition.broadcast(); condition.unlock()
                 log("\(dashboard) 仪表请求启动媒体（0x70），已回应 0x71")
                 continue
             case 0x40: response = 0x41
@@ -562,9 +563,16 @@ final class TailingConnection: @unchecked Sendable {
         condition.lock()
         let shouldFail = !closed && failure == nil
         if shouldFail { failure = error }
+        let started = mediaStartedAt
+        let frames = sentFrames
+        let pullsSoFar = pulls
         condition.unlock()
         if shouldFail {
             log("\(dashboard) 会话失败：\(error.localizedDescription)")
+            if let started, frames == 0, pullsSoFar == 0 {
+                let seconds = Date().timeIntervalSince(started)
+                log(String(format: "%@ 仪表在媒体启动后 %.1f 秒关闭会话：期间拉帧 0 次、收到视频帧 0 个。不是投屏协议失败——本机 CarPlay 会话没有建立（接收器 0 连接）时没有可发送的画面，仪表约 10 秒后主动放弃", dashboard, seconds))
+            }
             close()
         }
     }
