@@ -409,8 +409,8 @@ final class TailingConnection: @unchecked Sendable {
                       echoed == signature else { throw TailingError.protocolFailure("媒体身份回显不匹配") }
                 try identity.verify(echoed, huid: huid)
                 payload.appendLE(UInt32(isZeeho ? 2 : 1))
-                let replyWidth = profile.acceptsReportedSize ? width : profile.width
-                let replyHeight = profile.acceptsReportedSize ? height : profile.height
+                let replyWidth = profile.acceptsReportedSize ? Int(width) : profile.width
+                let replyHeight = profile.acceptsReportedSize ? Int(height) : profile.height
                 payload.appendLE(UInt16(replyWidth))
                 payload.appendLE(UInt16(replyHeight))
                 response = 0x11

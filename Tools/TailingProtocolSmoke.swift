@@ -191,10 +191,10 @@ struct TailingTests {
                 let aux = try connect(ports.auxiliary)
                 var config = Data()
                 // AE2 上报自有面板尺寸（如 854×480），其余沿用固定规格。
-                let reportedWidth = profile.acceptsReportedSize ? 854 : (isZeeho ? 1024 : 480)
-                let reportedHeight = profile.acceptsReportedSize ? 480 : (isZeeho ? 488 : 272)
-                config.appendLE(UInt16(reportedWidth))
-                config.appendLE(UInt16(reportedHeight))
+                let reportedWidth: UInt16 = profile.acceptsReportedSize ? 854 : (isZeeho ? 1024 : 480)
+                let reportedHeight: UInt16 = profile.acceptsReportedSize ? 480 : (isZeeho ? 488 : 272)
+                config.appendLE(reportedWidth)
+                config.appendLE(reportedHeight)
                 config.append(Data(repeating: 0, count: 28)); config.append(Data(signature.base64EncodedString().utf8))
                 try aux.write(TailingProtocol.auxiliary(0x10, token: 57, payload: config))
                 let configured = try TailingProtocol.readAuxiliary { try aux.readExactly($0) }
