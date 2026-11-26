@@ -1,6 +1,7 @@
 import UIKit
 import SwiftUI
 import AVKit
+import Security
 import Network
 import NetworkExtension
 import CoreLocation
@@ -80,6 +81,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var autoDetectWiFiName: Bool { canDetectWiFiName && wifiNameSource.selectedSegmentIndex == 0 }
     /// The settings sheet while it is shown.
     private weak var settingsNavigation: UINavigationController?
+    /// The shared document picker is used for both MFi identity and HTTPS P12 import.
+    private var pickingMFiIdentity = false
     private let transportProbeButton = UIButton(type: .system)
     private let orientationControl = ChoiceMenu(items: ["横屏", "竖屏"])
     private let wifiPathMonitor = NWPathMonitor(requiredInterfaceType: .wifi)
@@ -340,6 +343,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         statusRow.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12)
         statusRow.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.1)
         statusRow.layer.cornerRadius = 12; statusRow.layer.cornerCurve = .continuous
+        statusRow.isUserInteractionEnabled = true
+        statusRow.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(identityBannerTapped)))
         startupHint.font = .preferredFont(forTextStyle: .footnote)
         startupHint.textColor = .secondaryLabel
         startupHint.numberOfLines = 0
@@ -1261,10 +1266,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         } catch { savedReadError = "无法读取已保存的密码（\(error.localizedDescription)），请重新输入。" }
         // TrollStore builds can read the password iOS saved when joining this network;
         // once found, keep a copy so it survives without the system keychain entitlement.
-        guard let system = SystemWiFiPassword.password(forSSID: ssid), !system.isEmpty else {
+        let probes = SystemWiFiPassword.probes(forSSID: ssid)
+        guard let hit = probes.first(where: { !($0.password ?? "").isEmpty }), let system = hit.password else {
+            for probe in probes { log("系统 Wi-Fi 密码读取失败（\(probe.service)）：\(Self.keychainStatusText(probe.status))") }
             if let savedReadError { passwordStatus.text = savedReadError; alert("Wi-Fi 密码读取失败", savedReadError, copies: true) }
             return
         }
+        log("已从系统钥匙串读取 Wi-Fi 密码（\(hit.service)）")
         passwordField.text = system; openNetworkSwitch.isOn = false
         passwordStatus.text = savedReadError == nil
             ? "已自动读取系统保存的 Wi-Fi 密码"
@@ -1272,6 +1280,35 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         do { try WiFiCredentials.save(system, for: ssid) } catch {
             passwordStatus.text = "已自动读取系统保存的 Wi-Fi 密码（保存到本 App 失败：\(error.localizedDescription)）"
         }
+    }
+    private static func keychainStatusText(_ status: OSStatus) -> String {
+        switch status {
+        case errSecSuccess: return "读取成功"
+        case errSecItemNotFound: return "未找到（-25300），系统没有保存过该网络的密码"
+        case -34018: return "缺少 Keychain 权限（-34018），需要用 TrollStore 签名安装"
+        default: return "错误 \(status)"
+        }
+    }
+    /// Manual fallback for the Wi-Fi form: shows why the system copy is unavailable.
+    private func readSystemWiFiPassword() {
+        let ssid = ssidField.text ?? ""
+        guard !ssid.isEmpty else { alert("读取失败", "请先填写或识别 Wi-Fi 名称。"); return }
+        view.endEditing(true)
+        let probes = SystemWiFiPassword.probes(forSSID: ssid)
+        for probe in probes { log("系统 Wi-Fi 密码（\(probe.service)）：\(Self.keychainStatusText(probe.status))") }
+        guard let hit = probes.first(where: { !($0.password ?? "").isEmpty }), let password = hit.password else {
+            let details = probes.map { "\($0.service)：\(Self.keychainStatusText($0.status))" }.joined(separator: "\n")
+            alert("读取失败", details, copies: true)
+            return
+        }
+        passwordField.text = password
+        openNetworkSwitch.isOn = false
+        passwordStatus.text = "已从系统钥匙串读取密码（\(password.utf8.count) 字节）"
+        do { try WiFiCredentials.save(password, for: ssid) } catch {
+            passwordStatus.text = "已读取密码，但保存到本 App 失败：\(error.localizedDescription)"
+        }
+        log("已手动从系统钥匙串读取 Wi-Fi 密码（\(hit.service)）")
+        reloadVisibleSettings()
     }
     private func refreshNetworkSummary() {
         let name = ssidField.text ?? ""
@@ -1417,9 +1454,58 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             statusLabel.text = "可以开始连接"
         } catch {
             identity = nil
-            statusLabel.text = "尚未导入有效的 MFi 身份"; startButton.isEnabled = false
+            statusLabel.text = "尚未导入有效的 MFi 身份 · 轻点导入"; startButton.isEnabled = false
             log("请通过 Documents/IdentityImport 导入 certificate.p7b、leaf.cer 和 private.x963。错误：\(error.localizedDescription)")
             if importing { saveIdentityImportResult("failure: \(error.localizedDescription)") }
+        }
+    }
+    @objc private func identityBannerTapped() {
+        guard identity == nil, !running, !waitingForNetwork else { return }
+        importMFiIdentity()
+    }
+    private func importMFiIdentity() {
+        guard !running, !waitingForNetwork else {
+            alert("暂时无法导入", "请先停止 CarPlay。")
+            return
+        }
+        pickingMFiIdentity = true
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: true)
+        picker.allowsMultipleSelection = true
+        picker.delegate = self
+        (settingsNavigation ?? self).present(picker, animated: true)
+    }
+    private func importPickedIdentityFiles(_ urls: [URL]) {
+        guard !running, !waitingForNetwork else { return }
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            alert("导入失败", "App 的 Documents 目录不可用", copies: true)
+            return
+        }
+        let directory = documents.appendingPathComponent("IdentityImport", isDirectory: true)
+        do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+        catch {
+            alert("导入失败", "无法创建 IdentityImport 目录：\(error.localizedDescription)", copies: true)
+            return
+        }
+        var failures: [String] = []
+        for url in urls {
+            let target = directory.appendingPathComponent(url.lastPathComponent)
+            do {
+                try? FileManager.default.removeItem(at: target)
+                try FileManager.default.copyItem(at: url, to: target)
+            } catch { failures.append("\(url.lastPathComponent)：\(error.localizedDescription)") }
+        }
+        guard failures.isEmpty else {
+            alert("导入失败", failures.joined(separator: "\n"), copies: true)
+            return
+        }
+        do {
+            _ = try AccessoryIdentityStore.importFromDocuments()
+            loadIdentity()
+            modeChanged()
+            alert("导入成功", "MFi 身份已保存到本机 Keychain，现在可以启动本机 CarPlay。")
+        } catch {
+            log("MFi 身份导入失败：\(error.localizedDescription)")
+            alert("导入失败", "需要同时选择 certificate.p7b、leaf.cer 和 private.x963（文件名需保持不变）。\n\(error.localizedDescription)", copies: true)
         }
     }
     private func saveIdentityImportResult(_ result: String) {
@@ -1652,7 +1738,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         modeControl.isEnabled = true
         UIApplication.shared.isIdleTimerDisabled = false; setEditing(true)
         modeChanged()
-        statusLabel.text = identity == nil ? "需要导入 MFi 身份" : "已停止"
+        statusLabel.text = identity == nil ? "需要导入 MFi 身份 · 轻点导入" : "已停止"
         log("CarPlay 接收已停止")
     }
 
@@ -1708,7 +1794,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         startButton.isEnabled = identity != nil
         startButton.configuration?.image = UIImage(systemName: "play.fill")
         startButton.setTitle(remote ? "连接到 iPad" : local ? "启动本机 CarPlay" : "启动 CarPlay 接收屏", for: .normal)
-        statusLabel.text = identity == nil ? "需要导入 MFi 身份" : remote ? "请选择接收端" : "准备就绪"
+        statusLabel.text = identity == nil ? "需要导入 MFi 身份 · 轻点导入" : remote ? "请选择接收端" : "准备就绪"
         refreshCurrentNetwork(requestPermission: false)
     }
     private func setEditing(_ value: Bool) {
@@ -2527,6 +2613,11 @@ extension ReceiverViewController {
                 .control("开放网络（无密码）", openNetworkSwitch),
                 .field("兼容信道", channelField, placeholder: "36")
             ]
+            if editable, !(ssidField.text ?? "").isEmpty {
+                fields.append(.action("从系统读取 Wi-Fi 密码", icon: ("key.fill", .systemBlue)) { [unowned self] in
+                    self.readSystemWiFiPassword()
+                })
+            }
             if !openNetworkSwitch.isOn, let password = passwordField.text, !password.isEmpty {
                 fields.append(.action("复制密码", icon: ("doc.on.doc", .systemBlue), detail: { "将当前密码复制到剪贴板" }) { [unowned self] in
                     UIPasteboard.general.string = self.passwordField.text ?? ""
@@ -2558,6 +2649,15 @@ extension ReceiverViewController {
             let reason = hasName ? self.passwordStatus.text : nil
             (self.ssidField.text, self.passwordField.text, self.channelField.text,
              self.openNetworkSwitch.isOn, self.passwordLoadedForSSID, self.passwordStatus.text) = previous
+            // A rejected add rolls back to empty fields; fall back to the saved preset
+            // so the home card does not claim no preset exists.
+            if (self.ssidField.text ?? "").isEmpty, let selected = WiFiPresetStore.selected() {
+                self.ssidField.text = selected.ssid
+                self.channelField.text = String(selected.channel)
+                self.openNetworkSwitch.isOn = selected.isOpen
+                self.passwordField.text = ""
+                self.passwordLoadedForSSID = nil
+            }
             self.refreshNetworkSummary()
             if let reason {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -2894,6 +2994,9 @@ extension ReceiverViewController {
         }
         return SettingsSection("诊断信息", [
             .page("日志", icon: ("doc.text.fill", .systemGray)) { [unowned self] in self.logPage() },
+            .action(identity == nil ? "导入 MFi 身份" : "重新导入 MFi 身份", icon: ("key.fill", .systemOrange)) { [unowned self] in
+                self.importMFiIdentity()
+            },
             .info("浏览器页面", BrowserReceiverPage.version),
             .info("设备", "\(model) · iOS \(UIDevice.current.systemVersion)"),
             .info("MFi 身份", identity != nil ? "已载入" : "未载入")
@@ -2963,6 +3066,19 @@ extension ReceiverViewController {
 
 extension ReceiverViewController: UIDocumentPickerDelegate {
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        if pickingMFiIdentity {
+            pickingMFiIdentity = false
+            let finish: () -> Void = { [weak self] in
+                guard let self else { return }
+                self.importPickedIdentityFiles(urls)
+            }
+            if controller.presentingViewController != nil {
+                controller.dismiss(animated: true, completion: finish)
+            } else {
+                DispatchQueue.main.async(execute: finish)
+            }
+            return
+        }
         guard let url = urls.first, !running else { return }
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
@@ -2987,6 +3103,9 @@ extension ReceiverViewController: UIDocumentPickerDelegate {
         } else {
             DispatchQueue.main.async(execute: presentPrompt)
         }
+    }
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        pickingMFiIdentity = false
     }
 }
 
