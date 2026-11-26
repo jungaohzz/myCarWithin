@@ -2,7 +2,14 @@
 
 [English](README.en.md) · **简体中文**
 
-[![Platform: iOS 15.0+](https://img.shields.io/badge/iOS-15.0%2B-blue)](#下载与安装) [![Status: released](https://img.shields.io/badge/status-released-brightgreen)](#快速开始) [![Release](https://img.shields.io/github/v/release/xmz28/CarWithin?label=release)](https://github.com/xmz28/CarWithin/releases/latest)
+> **致谢原创作者**
+>
+> 本项目完整克隆自 **[xmz28/CarWithin](https://github.com/xmz28/CarWithin)**，原作者为 **[xmz28](https://github.com/xmz28)**。
+> 本仓库（[jungaohzz/myCarWithin](https://github.com/jungaohzz/myCarWithin)）仅在此基础上做个人化改造：扩充诊断日志、适配极核 AE2 仪表、并将最低安装目标降到 iOS 15.0 以便在个人设备上验证。
+> 所有核心能力——本机 CarPlay 虚拟配件、iAP2/MFi 握手、RTSP 接收端、浏览器/仪表输出、协议逆向——均来自原项目。**请优先关注并支持原项目**：给它点 Star、通过原仓库反馈问题、或向原作者赞助。
+> 原项目地址：<https://github.com/xmz28/CarWithin>
+
+[![Platform: iOS 15.0+](https://img.shields.io/badge/iOS-15.0%2B-blue)](#下载与安装) [![Status: released](https://img.shields.io/badge/status-released-brightgreen)](#快速开始) [![Upstream](https://img.shields.io/badge/upstream-xmz28%2FCarWithin-orange)](https://github.com/xmz28/CarWithin)
 
 CarWithin 在同一台 iPhone 上启动、显示和触控本机 CarPlay。你可以直接在 iPhone 上用导航、音乐等 CarPlay 应用，也可以把画面送到同一局域网的车机浏览器、平板、电脑或另一台手机。浏览器接收支持触控回传。
 
@@ -128,9 +135,19 @@ CarWithin 基于 tds-car-kit，完整组合程序按 AGPL-3.0-only 分发。原�
 
 ## 作者与支持
 
-### ☕ 请我喝杯咖啡
+### ❤️ 原作者：xmz28
 
-CarWithin 最初是我出于兴趣做的小工具。感谢大家分享自己的使用体验，帮我发现了不少设备兼容和投屏问题。如果它对你有帮助，欢迎请我喝杯咖啡，支持后续的开发、测试和维护。
+**CarWithin 由 [xmz28](https://github.com/xmz28) 原创开发**，仓库地址 [xmz28/CarWithin](https://github.com/xmz28/CarWithin)。
+
+本项目是它的克隆与个人改造版本。没有原作者的逆向工作与持续维护，这一切都不会存在。请：
+
+- 给原项目点 **Star**：<https://github.com/xmz28/CarWithin>
+- 通过 **原仓库** 反馈通用问题：<https://github.com/xmz28/CarWithin/issues>
+- 通过 **原作者的赞赏码** 支持开发（见下方，来源为原项目文档）
+
+### ☕ 请原作者喝杯咖啡
+
+CarWithin 最初是原作者出于兴趣做的小工具。感谢大家分享自己的使用体验，帮原作者发现了不少设备兼容和投屏问题。如果它对你有帮助，欢迎请原作者喝杯咖啡，支持后续的开发、测试和维护。
 
 | 支付宝收款码 | 微信赞赏码 |
 | :---: | :---: |
@@ -139,6 +156,14 @@ CarWithin 最初是我出于兴趣做的小工具。感谢大家分享自己的�
 
 赞赏完全自愿，下载、使用和更新照常。点个 Star、分享项目或反馈问题，也都是支持。
 
-[关注作者（抖音）](https://v.douyin.com/x64M2NbYj0A/)
+[关注原作者（抖音）](https://v.douyin.com/x64M2NbYj0A/)
 
-Copyright © 2026 xmz28
+### 本仓库的改动
+
+[jungaohzz/myCarWithin](https://github.com/jungaohzz/myCarWithin) 在上游基础上仅做了以下个人化调整：
+
+- 最低安装目标从 iOS 16.0 降到 iOS 15.0，以便在个人 iOS 15.6 设备上安装与诊断（本机 CarPlay 仍需 iOS 16+ 才能启动会话）
+- 极核 AE2 5 寸仪表适配（按仪表上报面板尺寸自动适配，帧率可选）
+- 大幅扩充诊断日志：崩溃捕获、iAP2 逐包十六进制、接收端心跳与帧样本、极核 PXC 报文与拉帧统计
+
+Copyright © 2026 xmz28（原创）。本仓库改动的版权归 jungaohzz 所有，同样按 AGPL-3.0-only 分发。
