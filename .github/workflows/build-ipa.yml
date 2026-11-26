@@ -12,6 +12,10 @@ jobs:
       - name: Show toolchain
         run: xcodebuild -version
 
+      - name: Protocol smoke tests (non-blocking)
+        continue-on-error: true
+        run: bash Tools/test_tailing.sh
+
       - name: Build
         run: |
           set -o pipefail
