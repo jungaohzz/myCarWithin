@@ -133,7 +133,7 @@ final class TailingConnection: @unchecked Sendable {
         if let discoveredSocket { announcement = discoveredSocket }
         else { announcement = try openAnnouncement() }
         defer { announcement.close() }
-        let probe = TailingProtocol.json(["phoneType": "iOS", "packageName": phone.package])
+        let probe = try TailingProtocol.json(["phoneType": "iOS", "packageName": phone.package])
         log("\(dashboard) 10930 探测请求 0x70000010（\(probe.count) 字节）：\(textPreview(probe, limit: 200))")
         try announcement.write(TailingProtocol.control(0x70000010, payload: probe))
         let reply = try TailingProtocol.readControl { try announcement.readExactly($0, timeout: 3) }
