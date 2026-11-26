@@ -1221,7 +1221,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         // TrollStore builds can read the password iOS saved when joining this network;
         // once found, keep a copy so it survives without the system keychain entitlement.
         guard let system = SystemWiFiPassword.password(forSSID: ssid) else {
-            if let savedReadError { passwordStatus.text = savedReadError; alert("Wi-Fi 密码读取失败", savedReadError) }
+            if let savedReadError { passwordStatus.text = savedReadError; alert("Wi-Fi 密码读取失败", savedReadError, copies: true) }
             return
         }
         passwordField.text = system; openNetworkSwitch.isOn = system.isEmpty
@@ -2013,7 +2013,11 @@ extension ReceiverViewController {
     private func page(_ title: String, _ build: @escaping () -> [SettingsSection]) -> SettingsPageController {
         SettingsPageController(title: title, build: build)
     }
-    private func alert(_ title: String, _ message: String) {
+    /// `copies` puts the message on the clipboard before showing the alert — used for
+    /// errors so they can be pasted into diagnostics; success confirmations opt out
+    /// because copying would overwrite whatever was just copied.
+    private func alert(_ title: String, _ message: String, copies: Bool = false) {
+        if copies { UIPasteboard.general.string = "\(title)\n\(message)" }
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "好", style: .default))
         (settingsNavigation ?? self).present(alert, animated: true)
@@ -2112,7 +2116,7 @@ extension ReceiverViewController {
                 guard !Task.isCancelled else { return }
                 AppUpdatePolicy().failed()
                 if manual, self.settingsNavigation?.viewIfLoaded?.window != nil {
-                    self.alert("检查更新失败", error.localizedDescription)
+                    self.alert("检查更新失败", error.localizedDescription, copies: true)
                 }
             }
         }
@@ -2486,7 +2490,7 @@ extension ReceiverViewController {
             self.refreshNetworkSummary()
             if let reason {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                    self?.alert("Wi-Fi 未保存", reason)
+                    self?.alert("Wi-Fi 未保存", reason, copies: true)
                 }
             }
         }
@@ -2510,7 +2514,7 @@ extension ReceiverViewController {
                 row.onDelete = { [unowned self] in
                     guard !self.running else { return }
                     do { try WiFiCredentials.forget(preset.ssid) }
-                    catch { self.alert("删除失败", "无法删除保存的密码，请重试。"); return }
+                    catch { self.alert("删除失败", "无法删除保存的密码，请重试。", copies: true); return }
                     WiFiPresetStore.remove(preset.ssid)
                     if self.ssidField.text == preset.ssid {
                         if let next = WiFiPresetStore.selected() { self.applyWiFiPreset(next) }
@@ -2764,7 +2768,7 @@ extension ReceiverViewController {
 
     private func copySettingsAddress(_ url: String?) {
         guard let url else {
-            alert("无法复制地址", browserPortError ?? "请先连接 Wi-Fi。")
+            alert("无法复制地址", browserPortError ?? "请先连接 Wi-Fi。", copies: true)
             return
         }
         UIPasteboard.general.string = url
@@ -2887,7 +2891,7 @@ extension ReceiverViewController: UIDocumentPickerDelegate {
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
         guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 512 * 1024,
-              let data = try? Data(contentsOf: url) else { alert("无法导入", "请选择不超过 512 KB 的 P12 证书。"); return }
+              let data = try? Data(contentsOf: url) else { alert("无法导入", "请选择不超过 512 KB 的 P12 证书。", copies: true); return }
         let prompt = UIAlertController(title: "证书密码", message: "密码与证书仅保存在本机 Keychain。", preferredStyle: .alert)
         prompt.addTextField { $0.isSecureTextEntry = true; $0.placeholder = "P12 密码，可为空" }
         prompt.addAction(UIAlertAction(title: "取消", style: .cancel))
@@ -2944,7 +2948,7 @@ extension ReceiverViewController: PHPickerViewControllerDelegate {
                 self.importingVehicleIcon = false
                 defer { self.reloadVisibleSettings() }
                 guard let png else {
-                    self.alert("无法读取图片", "请选择另一张照片再试。")
+                    self.alert("无法读取图片", "请选择另一张照片再试。", copies: true)
                     return
                 }
                 UserDefaults.standard.set(png, forKey: Self.customVehicleIconKey)
