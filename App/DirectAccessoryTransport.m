@@ -1,12 +1,14 @@
 #import "DirectAccessoryTransport.h"
 #import <TargetConditionals.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 
 @interface DirectAccessoryTransport ()
 @property(nonatomic, strong) id client;
 @property(nonatomic, copy) NSString *connection;
 @property(nonatomic, copy) NSString *endpoint;
 @property(nonatomic, strong) NSUUID *generation;
+@property(nonatomic, readwrite, copy, nullable) NSString *connectionTypeDescription;
 @end
 
 @implementation DirectAccessoryTransport
@@ -19,6 +21,33 @@ static BOOL HasMethod(id object, NSString *name, NSUInteger arguments) {
     SEL selector = NSSelectorFromString(name);
     return [object respondsToSelector:selector] &&
            [object methodSignatureForSelector:selector].numberOfArguments == arguments + 2;
+}
+static Class ACCClientClass(void) {
+    Class cls = NSClassFromString(@"ACCTransportClient");
+    if (!cls) {
+        [[NSBundle bundleWithPath:@"/System/Library/PrivateFrameworks/CoreAccessories.framework"] load];
+        cls = NSClassFromString(@"ACCTransportClient");
+    }
+    return cls;
+}
++ (NSString *)apiSummary {
+    @try {
+        Class cls = ACCClientClass();
+        if (!cls) return @"ACCTransportClient 不可用";
+        NSMutableArray<NSString *> *names = [NSMutableArray arrayWithObject:@"类方法:"];
+        unsigned int count = 0;
+        Method *methods = class_copyMethodList(object_getClass(cls), &count);
+        for (unsigned int i = 0; i < count; i++) [names addObject:NSStringFromSelector(method_getName(methods[i]))];
+        free(methods);
+        [names addObject:@"| 实例方法:"];
+        count = 0;
+        methods = class_copyMethodList(cls, &count);
+        for (unsigned int i = 0; i < count; i++) [names addObject:NSStringFromSelector(method_getName(methods[i]))];
+        free(methods);
+        return [names componentsJoinedByString:@" "];
+    } @catch (NSException *exception) {
+        return [NSString stringWithFormat:@"枚举异常 %@：%@", exception.name, exception.reason];
+    }
 }
 - (BOOL)startWithIdentifier:(NSString *)identifier transportType:(NSUInteger)transportType error:(NSError **)error {
     [self stop];
@@ -45,12 +74,18 @@ static BOOL HasMethod(id object, NSString *name, NSUInteger arguments) {
             return Failed(error, @"CoreAccessories transport methods are unavailable or have changed.");
         }
         // Try connection type 2, then 1; the Wi-Fi endpoint uses transport type 2.
+        // Which one the OS accepts is logged because iOS 15 may fall back to type 1.
         id connection = ((id (*)(id, SEL, NSUInteger, id))objc_msgSend)(self.client, NSSelectorFromString(create), 2, identifier);
-        if (!connection) connection = ((id (*)(id, SEL, NSUInteger, id))objc_msgSend)(self.client, NSSelectorFromString(create), 1, identifier);
+        NSUInteger usedType = 2;
+        if (!connection) {
+            connection = ((id (*)(id, SEL, NSUInteger, id))objc_msgSend)(self.client, NSSelectorFromString(create), 1, identifier);
+            usedType = 1;
+        }
         if (![connection isKindOfClass:NSString.class]) {
             [self stop];
             return Failed(error, @"CoreAccessories refused the connection. This signed app may lack access to the private transport.");
         }
+        self.connectionTypeDescription = usedType == 2 ? @"2" : @"1";
         self.connection = connection;
         self.generation = NSUUID.UUID;
         NSUUID *generation = self.generation;

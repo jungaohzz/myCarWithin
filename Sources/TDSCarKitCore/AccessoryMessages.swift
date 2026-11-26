@@ -21,7 +21,10 @@ public enum AccessoryMessages {
     private static func group(_ id: UInt16, _ values: [IAP2Parameter]) throws -> IAP2Parameter {
         IAP2Parameter(id: id, value: try values.reduce(into: Data()) { $0.append(try $1.encoded()) })
     }
-    public static func identification(name: String, deviceID: String) throws -> IAP2Message {
+    /// `wifiOnly` drops the USBHost and Bluetooth transport groups. iOS 15's CarPlay daemon
+    /// may follow the first declared transport instead of the Wi-Fi one, so the experiment
+    /// lets the accessory declare only WiFiCarPlay.
+    public static func identification(name: String, deviceID: String, wifiOnly: Bool = false) throws -> IAP2Message {
         let mac = deviceID.split(separator: ":").compactMap { UInt8($0, radix: 16) }
         guard mac.count == 6 else { throw ProtocolError.malformed("accessory device ID") }
         var fields = [string(0, name), string(1, "CP-Receiver-1"), string(2, "OEM"), string(3, "SN000001"),
@@ -29,10 +32,12 @@ public enum AccessoryMessages {
             IAP2Parameter(id: 6, value: Data([0x43, 1])), IAP2Parameter(id: 7, value: Data([0x43, 0])),
             IAP2Parameter(id: 8, value: Data([0])), IAP2Parameter(id: 9, value: Data([0, 0])),
             string(12, "en"), string(13, "en")]
-        fields.append(try group(16, [IAP2Parameter(id: 0, value: Data([0, 1])), string(1, "USBHost"),
-            IAP2Parameter(id: 2, value: Data()), IAP2Parameter(id: 3, value: Data([1])), IAP2Parameter(id: 4, value: Data())]))
-        fields.append(try group(17, [IAP2Parameter(id: 0, value: Data([0, 2])), string(1, "Bluetooth"),
-            IAP2Parameter(id: 2, value: Data()), IAP2Parameter(id: 3, value: Data(mac))]))
+        if !wifiOnly {
+            fields.append(try group(16, [IAP2Parameter(id: 0, value: Data([0, 1])), string(1, "USBHost"),
+                IAP2Parameter(id: 2, value: Data()), IAP2Parameter(id: 3, value: Data([1])), IAP2Parameter(id: 4, value: Data())]))
+            fields.append(try group(17, [IAP2Parameter(id: 0, value: Data([0, 2])), string(1, "Bluetooth"),
+                IAP2Parameter(id: 2, value: Data()), IAP2Parameter(id: 3, value: Data(mac))]))
+        }
         fields.append(try group(24, [IAP2Parameter(id: 0, value: Data([0, 3])), string(1, "WiFiCarPlay"),
             IAP2Parameter(id: 2, value: Data()), IAP2Parameter(id: 4, value: Data())]))
         return IAP2Message(id: 0x1d01, parameters: fields)

@@ -34,6 +34,7 @@
 		2AD4CB8F61CAF801CA8F8E0A /* Sources/TDSCarKitCore/Vendor/BigInt/Integer Conversion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C22523C685FF3D5D1E5DEBD /* Sources/TDSCarKitCore/Vendor/BigInt/Integer Conversion.swift */; };
 		2E2D3509DE30136BB95409EE /* App/BrowserReceiverPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C60B0AAF013CD73B180689D /* App/BrowserReceiverPage.swift */; };
 		317280AA587980E347998259 /* App/SameDeviceProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E16358245C1D6E4C9ECD5FA /* App/SameDeviceProbe.swift */; };
+		5C1A9E7D34B8F20A6D4E123B /* App/SystemDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C1A9E7D34B8F20A6D4E123C /* App/SystemDiagnostics.swift */; };
 		347D0B4563E800C4844F2942 /* Sources/TDSCarKitCore/Vendor/BigInt/Exponentiation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 664C31BA46CF1D5E3B64D435 /* Sources/TDSCarKitCore/Vendor/BigInt/Exponentiation.swift */; };
 		354330CE6A98B2498BB64931 /* App/VideoOutputServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24D25E3C50CC9A0575E5FF1D /* App/VideoOutputServer.swift */; };
 		391CDD8430BE8B39EC436A3D /* Sources/TDSCarKitCore/RTSP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C15547F7887F6D8488371E6 /* Sources/TDSCarKitCore/RTSP.swift */; };
@@ -145,6 +146,7 @@
 		6142600AECCA0915480B6338 /* Sources/TDSCarKitCore/Vendor/BigInt/Hashable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/TDSCarKitCore/Vendor/BigInt/Hashable.swift; sourceTree = "<group>"; };
 		664C31BA46CF1D5E3B64D435 /* Sources/TDSCarKitCore/Vendor/BigInt/Exponentiation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/TDSCarKitCore/Vendor/BigInt/Exponentiation.swift; sourceTree = "<group>"; };
 		6E16358245C1D6E4C9ECD5FA /* App/SameDeviceProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/SameDeviceProbe.swift; sourceTree = "<group>"; };
+		5C1A9E7D34B8F20A6D4E123C /* App/SystemDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/SystemDiagnostics.swift; sourceTree = "<group>"; };
 		75E81123FE07B05287A2894B /* Sources/TDSCarKitCore/Vendor/BigInt/Codable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/TDSCarKitCore/Vendor/BigInt/Codable.swift; sourceTree = "<group>"; };
 		77EA498A0CBD1F760370C8D4 /* Sources/TDSCarKitCore/Vendor/BigInt/Prime Test.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/TDSCarKitCore/Vendor/BigInt/Prime Test.swift"; sourceTree = "<group>"; };
 		7CF469AB54702446B6BF13AC /* Sources/TDSCarKitCore/Binary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/TDSCarKitCore/Binary.swift; sourceTree = "<group>"; };
@@ -232,6 +234,7 @@
 				4B70235FFE972F257D61E968 /* App/ReceiverViewController.swift */,
 				6E16358245C1D6E4C9ECD5FA /* App/SameDeviceProbe.swift */,
 				B374C20AACA7AAE5D44C7088 /* App/SettingsUI.swift */,
+				5C1A9E7D34B8F20A6D4E123C /* App/SystemDiagnostics.swift */,
 				D06E3F91A5247B8C2E7A91F3 /* App/SystemWiFiPassword.swift */,
 				24D25E3C50CC9A0575E5FF1D /* App/VideoOutputServer.swift */,
 				1E01738CFB87BC0126A2372B /* App/WiFiPresetStore.swift */,
@@ -388,6 +391,7 @@
 				E30B5264FB459950C8F64D8F /* App/ReceiverViewController.swift in Sources */,
 				317280AA587980E347998259 /* App/SameDeviceProbe.swift in Sources */,
 				A77236DFEF0F54D93D1A8A28 /* App/SettingsUI.swift in Sources */,
+				5C1A9E7D34B8F20A6D4E123B /* App/SystemDiagnostics.swift in Sources */,
 				4F9C2B71E83A5D06B7C41E90 /* App/SystemWiFiPassword.swift in Sources */,
 				354330CE6A98B2498BB64931 /* App/VideoOutputServer.swift in Sources */,
 				7D5C38AAD75E95261497533A /* App/WiFiPresetStore.swift in Sources */,

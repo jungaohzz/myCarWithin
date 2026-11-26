@@ -24,6 +24,12 @@ final class SameDeviceProbe {
     private var messagesReceived = 0
     private var chunksReceived = 0
     private var startedAt = DispatchTime.now()
+    private var heartbeatTimer: DispatchSourceTimer?
+    // iOS 15 实验开关：同一轮日志里能看到实际使用的组合。
+    private var experimentTransportType: UInt = 2
+    private var effectiveTransportType: UInt = 2
+    private var experimentWifiOnly = false
+    private var experimentSkipWifi = false
     var onLog: ((String) -> Void)?
 
     private func hexPreview(_ data: Data, limit: Int = 96) -> String {
@@ -37,17 +43,31 @@ final class SameDeviceProbe {
         stop(); active = true; self.identity = identity; self.configuration = configuration
         self.expectsLocalControl = expectsLocalControl
         startedAt = .now()
+        let defaults = UserDefaults.standard
+        experimentTransportType = (defaults.object(forKey: "localTransportType") as? Int ?? 2) == 8 ? 8 : 2
+        experimentWifiOnly = defaults.bool(forKey: "localWifiOnlyIdent")
+        experimentSkipWifi = defaults.bool(forKey: "localSkipWifi")
+        effectiveTransportType = experimentTransportType
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let wifi = configuration.ssid.isEmpty ? "Wi-Fi 未填写"
             : "Wi-Fi \(configuration.ssid)/信道 \(configuration.wifiChannel)/\(configuration.password.isEmpty ? "开放网络" : "密码 \(configuration.password.utf8.count) 字节")"
-        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 2 · 期望控制连接=\(expectsLocalControl)")
+        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")")
+        onLog?("本机传输能力（CoreAccessories）：" + String(DirectAccessoryTransport.apiSummary().prefix(1500)))
         if !AppLog.localCarPlaySupport.supported { onLog?("警告：\(AppLog.localCarPlaySupport.summary)") }
         let run = generation
         transport.onData = { [weak self] data in self?.receive(data) }
         do {
-            // Use transport type 2 for a Wi-Fi accessory connection.
-            try transport.start(withIdentifier: configuration.deviceID, transportType: 2)
-            stage("已创建本机配件端点（传输类型 2），正在建立 iAP2")
+            // Type 2 is the Wi-Fi accessory connection; type 8 is the iOS 15 experiment.
+            do {
+                try transport.start(withIdentifier: configuration.deviceID, transportType: experimentTransportType)
+            } catch {
+                guard experimentTransportType != 2 else { throw error }
+                onLog?("传输类型 \(experimentTransportType) 失败（\(error.localizedDescription)），回退传输类型 2")
+                effectiveTransportType = 2
+                try transport.start(withIdentifier: configuration.deviceID, transportType: 2)
+            }
+            stage("已创建本机配件端点（传输类型 \(effectiveTransportType)，CoreAccessories 连接类型 \(transport.connectionTypeDescription ?? "?")），正在建立 iAP2")
+            startHeartbeat()
             try transport.send(IAP2Packet.presence)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                 guard let self, self.active, self.generation == run else { return }
@@ -74,9 +94,26 @@ final class SameDeviceProbe {
     }
     func stop() {
         active = false; generation = UUID(); transport.stop(); transport.onData = nil; parser = IAP2Parser()
+        heartbeatTimer?.cancel(); heartbeatTimer = nil
         identity = nil; configuration = nil; messageBytes = Data(); sequence = 0x10; acknowledgement = 0
         session = 1; lastPayloadSequence = nil; linked = false; authenticated = false; identified = false; requested = false; controlConnected = false
         sessionRequests = 0; packetsReceived = 0; messagesReceived = 0; chunksReceived = 0; startedAt = .now()
+    }
+
+    /// 每 10 秒一行，证明 iAP2 链路本身仍然活着——CarPlay 守护进程不回连时，
+    /// 这行日志区分“链路死了”和“系统不理我们”。
+    private func startHeartbeat() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 10, repeating: 10)
+        var beats = 0
+        timer.setEventHandler { [weak self] in
+            guard let self, self.active else { return }
+            beats += 1
+            let live = ReceiverConfiguration.wifiIPv4Address() ?? "无 en0 地址"
+            self.onLog?("本机 iAP2 心跳 #\(beats)：包 \(self.packetsReceived)/消息 \(self.messagesReceived)，链路=\(self.linked ? "是" : "否")，认证=\(self.authenticated ? "是" : "否")，识别=\(self.identified ? "是" : "否")，0x4301 已发 \(self.sessionRequests) 次，控制连接=\(self.controlConnected ? "是" : "否")，当前 en0=\(live)")
+        }
+        timer.resume()
+        heartbeatTimer = timer
     }
     func didConnectControl() {
         guard active else { return }
@@ -84,12 +121,24 @@ final class SameDeviceProbe {
         stage("CarPlay 控制连接已建立，正在协商会话")
     }
     private func requestSession(_ configuration: ReceiverConfiguration) throws {
-        let wifi = try AccessoryMessages.WiFi(ssid: configuration.ssid, password: configuration.password, channel: configuration.wifiChannel)
+        let wifi: AccessoryMessages.WiFi?
+        if experimentSkipWifi {
+            wifi = nil
+        } else {
+            wifi = try AccessoryMessages.WiFi(ssid: configuration.ssid, password: configuration.password,
+                                              channel: configuration.wifiChannel)
+        }
         sessionRequests += 1
+        let live = ReceiverConfiguration.wifiIPv4Address() ?? "无 en0 地址"
+        if live != configuration.address {
+            onLog?("警告：0x4301 告知的地址 \(configuration.address) 与当前 en0 \(live) 不一致；守护进程若按此地址回连会连到错误主机")
+        }
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt.uptimeNanoseconds) / 1_000_000_000
-        onLog?(String(format: "第 %d 次发送 0x4301 启动 CarPlay（启动后 %.1f 秒）：目标 %@:%d，Wi-Fi %@（信道 %d，%@），标识 %@，认证=%@，识别=%@",
-            sessionRequests, elapsed, configuration.address, Int(configuration.port), wifi.ssid, Int(wifi.channel),
-            wifi.password.isEmpty ? "开放" : "密码 \(wifi.password.utf8.count) 字节",
+        let wifiText = wifi.map {
+            "Wi-Fi \($0.ssid)（信道 \(Int($0.channel))，\($0.password.isEmpty ? "开放" : "密码 \($0.password.utf8.count) 字节")）"
+        } ?? "不携带 Wi-Fi 组（实验）"
+        onLog?(String(format: "第 %d 次发送 0x4301 启动 CarPlay（启动后 %.1f 秒）：目标 %@:%d，%@，标识 %@，认证=%@，识别=%@",
+            sessionRequests, elapsed, configuration.address, Int(configuration.port), wifiText,
             configuration.deviceID, authenticated ? "是" : "否", identified ? "是" : "否"))
         try send(AccessoryMessages.startSession(address: configuration.address, port: configuration.port,
             deviceID: configuration.deviceID, wifi: wifi))
@@ -120,7 +169,7 @@ final class SameDeviceProbe {
         guard active else { return }
         do {
             chunksReceived += 1
-            if chunksReceived <= 400 {
+            if chunksReceived <= 4000 {
                 onLog?(String(format: "iAP2 原始数据块 #%d：%d 字节：%@", chunksReceived, data.count, hexPreview(data, limit: 48)))
             }
             for event in try parser.append(data) {
@@ -128,8 +177,8 @@ final class SameDeviceProbe {
                 case .presence: onLog?("本机 iOS 服务已响应 iAP2 在线探测")
                 case .packet(let packet):
                     packetsReceived += 1
-                    // 握手期数据量很小；长会话只记录前 400 个包，避免日志膨胀。
-                    if packetsReceived <= 400 {
+                    // 握手期数据量很小；上限放宽到 4000 个包，保证一次连接就留下全部证据。
+                    if packetsReceived <= 4000 {
                         onLog?(String(format: "iAP2 收到包 #%d：control=0x%02X seq=%d ack=%d session=%d 载荷=%d 字节：%@",
                             packetsReceived, Int(packet.control), Int(packet.sequence), Int(packet.acknowledgement),
                             Int(packet.session), packet.payload.count, hexPreview(packet.payload, limit: 96)))
@@ -166,7 +215,7 @@ final class SameDeviceProbe {
         messagesReceived += 1
         let bytes = message.parameters.reduce(0) { $0 + $1.value.count }
         onLog?(String(format: "收到 iAP2 消息 0x%04X（%d 个参数，载荷合计 %d 字节）", message.id, message.parameters.count, bytes))
-        if messagesReceived <= 300 {
+        if messagesReceived <= 2000 {
             for parameter in message.parameters {
                 onLog?(String(format: "  参数 %d（0x%04X）：%d 字节 %@", parameter.id, parameter.id,
                               parameter.value.count, hexPreview(parameter.value, limit: 64)))
@@ -180,7 +229,8 @@ final class SameDeviceProbe {
             try send(IAP2Message(id: 0xaa03, parameters: [IAP2Parameter(id: 0, value: identity.sign(challenge: challenge))]))
         case 0xaa04: finish("iOS 拒绝了配件认证（0xAA04）")
         case 0xaa05: authenticated = true; stage("iOS 已接受配件认证")
-        case 0x1d00: try send(AccessoryMessages.identification(name: configuration.name, deviceID: configuration.deviceID))
+        case 0x1d00: try send(AccessoryMessages.identification(name: configuration.name, deviceID: configuration.deviceID,
+                                                              wifiOnly: experimentWifiOnly))
         case 0x1d02: identified = true; stage("iOS 已接受配件识别，正在等待 CarPlay 可用通知")
         case 0x1d03:
             let rejected = message.parameters.map { String(format: "%04X:%@", $0.id, $0.value.prefix(32).map { String(format: "%02X", $0) }.joined()) }.joined(separator: ",")
