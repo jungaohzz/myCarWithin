@@ -302,6 +302,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let selectedPreset = WiFiPresetStore.selected()
         ssidField.text = selectedPreset?.ssid ?? UserDefaults.standard.string(forKey: "wifiSSID")
         ssidField.addTarget(self, action: #selector(networkNameChanged), for: .editingChanged)
+        ssidField.addTarget(self, action: #selector(ssidTypedByUser), for: .editingChanged)
         ssidField.addTarget(self, action: #selector(loadWiFiPassword), for: .editingDidEnd)
         wifiNameSource.selectedSegmentIndex = min(max(
             UserDefaults.standard.object(forKey: "wifiNameSource") as? Int ?? 0, 0), wifiNameSource.numberOfSegments - 1)
@@ -1217,6 +1218,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         NSLayoutConstraint.activate(inlineVideoConstraints)
     }
 
+    /// Typing an SSID is manual intent: leave auto mode so detection cannot overwrite it.
+    /// Deliberately does not reload the page — that would rebuild the list while typing.
+    @objc private func ssidTypedByUser() {
+        guard autoDetectWiFiName else { return }
+        wifiNameSource.selectedSegmentIndex = 1
+        UserDefaults.standard.set(1, forKey: "wifiNameSource")
+    }
     @objc private func networkNameChanged() {
         passwordLoadedForSSID = nil
         passwordField.text = ""; openNetworkSwitch.isOn = false; passwordStatus.text = ""
