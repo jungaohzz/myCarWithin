@@ -88,6 +88,7 @@ final class TailingConnection: @unchecked Sendable {
         if targetIP.isEmpty && isZeeho {
             log("极核正在自动查找仪表 IP，本机 Wi-Fi 地址 \(localIP)")
             let discovered = try TailingDiscovery.connect(localIP: localIP, port: ports.announcement,
+                log: { [self] in log($0) },
                 track: { [self] in try tracked($0) }, check: { [self] in try checkHealth() })
             targetIP = discovered.address
             discoveredSocket = discovered.socket

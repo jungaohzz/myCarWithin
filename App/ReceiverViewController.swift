@@ -1081,6 +1081,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             config.zeehoAddress = automatic ? "" : (zeehoAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             config.zeehoIsAE2 = outputMode == .zeehoAE2
             config.zeehoFrameRate = selectedZeehoAE2FrameRate
+            log("极核设置：目标 \(automatic ? "自动查找" : config.zeehoAddress ?? "")，AE2=\(config.zeehoIsAE2 ? "是" : "否")，帧率 \(config.zeehoFrameRate) FPS")
         }
         if outputMode == .ninebot {
             config.ninebotAddress = (ninebotAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1980,6 +1981,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }
     @objc private func copyLog() { UIPasteboard.general.string = lines.joined(separator: "\n") }
     private func log(_ message: String) {
+        AppLog.record(message)
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         lines.append("\(timestamp)  \(message)"); if lines.count > 200 { lines.removeFirst(lines.count - 200) }
         if logView.window != nil {
@@ -2371,6 +2373,7 @@ extension ReceiverViewController {
                         UIApplication.shared.open(Self.supportURL)
                     },
                     .page("诊断与实验", icon: ("stethoscope", .systemTeal)) { [unowned self] in self.diagnosticsPage() },
+                    .page("日志", icon: ("doc.text.fill", .systemGray)) { [unowned self] in self.logPage() },
                     .page("关于", icon: ("info.circle.fill", .systemGray)) { [unowned self] in self.aboutPage() }
                 ])
             ]
@@ -2988,12 +2991,23 @@ extension ReceiverViewController {
 
     fileprivate func logPage() -> SettingsPageController {
         let controller = page("日志") { [unowned self] in
-            [
-                SettingsSection(footer: "最近 200 条，不含 Wi-Fi 密码和 MFi 私钥。", [.view(logView)]),
-                SettingsSection([.action("复制日志", icon: ("doc.on.doc.fill", .systemBlue)) { [unowned self] in
+            var sections = [SettingsSection(footer: "最近 200 条，不含 Wi-Fi 密码和 MFi 私钥。", [.view(logView)])]
+            var actions = [
+                SettingsRow.action("发送最新日志", icon: ("square.and.arrow.up.fill", .systemBlue)) { [unowned self] in
+                    self.shareLog(AppLog.shared.currentFile)
+                },
+                SettingsRow.action("复制日志", icon: ("doc.on.doc.fill", .systemBlue)) { [unowned self] in
                     self.copyLog(); self.alert("已复制", "日志已复制到剪贴板。")
-                }])
+                }
             ]
+            if !AppLog.shared.files().isEmpty {
+                actions.append(.action("删除全部日志文件", icon: ("trash.fill", .systemRed), destructive: true) { [unowned self] in
+                    self.confirmDeleteLogs()
+                })
+            }
+            sections.append(SettingsSection("文本日志", footer: "每次启动 App 生成一个文件，包含时间、网络接口和各个连接的详细过程。点按可发送（选微信即可发给他人），左滑可删除；最多保留最近 30 个文件。", actions))
+            sections.append(SettingsSection("日志文件", logFileRows()))
+            return sections
         }
         logView.constraints.filter { $0.firstAttribute == .height }.forEach { $0.constant = 380 }
         controller.onAppear = { [unowned self] in
@@ -3001,6 +3015,41 @@ extension ReceiverViewController {
             if !self.logView.text.isEmpty { self.logView.scrollRangeToVisible(NSRange(location: self.logView.text.utf16.count - 1, length: 1)) }
         }
         return controller
+    }
+
+    private func logFileRows() -> [SettingsRow] {
+        let files = AppLog.shared.files()
+        guard !files.isEmpty else { return [.note("暂无日志文件。")] }
+        return files.map { url in
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
+            var row = SettingsRow.action(url.lastPathComponent, icon: ("doc.text.fill", .systemGray)) { [unowned self] in
+                self.shareLog(url)
+            }
+            row.subtitle = { "\(size >= 1024 ? "\(size / 1024) KB" : "\(size) B") · 点按发送" }
+            row.onDelete = { AppLog.shared.delete(url); self.reloadVisibleSettings() }
+            return row
+        }
+    }
+
+    private func shareLog(_ url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            alert("日志文件不存在", "可能已被删除。")
+            return
+        }
+        let share = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        share.popoverPresentationController?.sourceView = view
+        share.popoverPresentationController?.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+        (settingsNavigation ?? self).present(share, animated: true)
+    }
+
+    private func confirmDeleteLogs() {
+        let sheet = UIAlertController(title: "删除全部日志文件？", message: "删除后无法恢复，当前会话会继续写入新的日志文件。", preferredStyle: .alert)
+        sheet.addAction(UIAlertAction(title: "删除", style: .destructive) { [unowned self] _ in
+            AppLog.shared.deleteAll()
+            self.reloadVisibleSettings()
+        })
+        sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
+        (settingsNavigation ?? self).present(sheet, animated: true)
     }
 
     private func experimentSections() -> [SettingsSection] {

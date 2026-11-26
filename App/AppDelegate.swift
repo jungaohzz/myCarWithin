@@ -4,6 +4,8 @@ import UIKit
 final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, configurationForConnecting connectingSceneSession: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        // Starts the per-launch log file before any scene traffic.
+        AppLog.record("App 开始启动")
         let configuration = UISceneConfiguration(name: "Receiver", sessionRole: connectingSceneSession.role)
         configuration.delegateClass = SceneDelegate.self
         return configuration

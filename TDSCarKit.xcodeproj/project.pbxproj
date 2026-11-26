@@ -19,6 +19,7 @@
 		2A62092D5FAB7508B5E75585 /* App/TailingH264Decoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1F1006A6933CF59351244FE /* App/TailingH264Decoder.swift */; };
 		F981D54C81AFEB10623F8DF2 /* App/TailingConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BAEDF1212F9D1065D1112FF /* App/TailingConnection.swift */; };
 		878C53DFB771A8B34DE36F21 /* App/TailingDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5981FAF46062A6323066CC1 /* App/TailingDiscovery.swift */; };
+		421ABE8B743E672157CEADCE /* App/AppLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E0D127311FAE92290ACB28F /* App/AppLog.swift */; };
 		A3BC836AF3CEF11BA90F2319 /* App/HTTPSConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 710754EDDB93961D8CFD06B0 /* App/HTTPSConfiguration.swift */; };
 		08372A6889FA534DBA21968A /* Sources/TDSCarKitCore/Vendor/BigInt/Square Root.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6F318F2887324E3221684BE /* Sources/TDSCarKitCore/Vendor/BigInt/Square Root.swift */; };
 		0EC86F455714F97754ED72C4 /* App/H264Surface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59DB484630DAD05A9DD9EA6F /* App/H264Surface.swift */; };
@@ -104,6 +105,7 @@
 		F1F1006A6933CF59351244FE /* App/TailingH264Decoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/TailingH264Decoder.swift; sourceTree = "<group>"; };
 		7BAEDF1212F9D1065D1112FF /* App/TailingConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/TailingConnection.swift; sourceTree = "<group>"; };
 		B5981FAF46062A6323066CC1 /* App/TailingDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/TailingDiscovery.swift; sourceTree = "<group>"; };
+		7E0D127311FAE92290ACB28F /* App/AppLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/AppLog.swift; sourceTree = "<group>"; };
 		710754EDDB93961D8CFD06B0 /* App/HTTPSConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/HTTPSConfiguration.swift; sourceTree = "<group>"; };
 		001061EDE9D1B1FF88C6E546 /* Sources/TDSCarKitCore/Vendor/BigInt/Shifts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/TDSCarKitCore/Vendor/BigInt/Shifts.swift; sourceTree = "<group>"; };
 		020864086579988BC901BB0A /* App/CarPlayControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/CarPlayControls.swift; sourceTree = "<group>"; };
@@ -191,6 +193,7 @@
 			children = (
 				7BAEDF1212F9D1065D1112FF /* App/TailingConnection.swift */,
 				B5981FAF46062A6323066CC1 /* App/TailingDiscovery.swift */,
+				7E0D127311FAE92290ACB28F /* App/AppLog.swift */,
 				F1F1006A6933CF59351244FE /* App/TailingH264Decoder.swift */,
 				B04FAD42C897506E681468AD /* App/TailingIdentity.swift */,
 				15C6BB68729B79CB1589593B /* App/TailingOutput.swift */,
@@ -346,6 +349,7 @@
 			files = (
 				F981D54C81AFEB10623F8DF2 /* App/TailingConnection.swift in Sources */,
 				878C53DFB771A8B34DE36F21 /* App/TailingDiscovery.swift in Sources */,
+				421ABE8B743E672157CEADCE /* App/AppLog.swift in Sources */,
 				2A62092D5FAB7508B5E75585 /* App/TailingH264Decoder.swift in Sources */,
 				20981E104E400F63191A9A75 /* App/TailingIdentity.swift in Sources */,
 				88C07C68A7CFD386DB471AF9 /* App/TailingOutput.swift in Sources */,

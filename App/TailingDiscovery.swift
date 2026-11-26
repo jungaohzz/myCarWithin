@@ -55,7 +55,7 @@ enum TailingDiscovery {
     }
 
     #if canImport(Darwin)
-    private static func netmask(localIP: String) -> String? {
+    private static func interfaceInfo(localIP: String) -> (name: String, netmask: String)? {
         var first: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&first) == 0 else { return nil }
         defer { freeifaddrs(first) }
@@ -71,52 +71,96 @@ enum TailingDiscovery {
                 UInt32(bigEndian: $0.pointee.sin_addr.s_addr)
             }
             guard text(ip) == localIP else { continue }
-            return mask.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+            let value = mask.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
                 text(UInt32(bigEndian: $0.pointee.sin_addr.s_addr))
             }
+            return (String(cString: entry.pointee.ifa_name), value)
         }
         return nil
     }
 
-    static func connect(localIP: String, port: UInt16,
+    private static func subnetText(localIP: String, netmask: String) -> String {
+        guard let ip = number(localIP), let mask = number(netmask) else { return "未知网段" }
+        return "\(text(ip & mask))/\(mask.nonzeroBitCount)"
+    }
+
+    static func connect(localIP: String, port: UInt16, log: @escaping (String) -> Void = { _ in },
                         track: @escaping (TailingSocket) throws -> TailingSocket,
                         check: @escaping () throws -> Void) throws -> (address: String, socket: TailingSocket) {
-        guard let mask = netmask(localIP: localIP) else {
+        guard let interface = interfaceInfo(localIP: localIP) else {
             throw TailingError.protocolFailure("无法读取当前 Wi-Fi 子网，请连接仪表 Wi-Fi，或关闭自动查找并填写仪表 IP")
         }
+        guard !interface.name.hasPrefix("pdp_ip") else {
+            throw TailingError.protocolFailure("本机地址 \(localIP) 是蜂窝网络（\(interface.name)），自动查找只能扫描 Wi-Fi。请先在系统设置连接仪表 Wi-Fi，再启动投屏")
+        }
+        let mask = interface.netmask
+        let subnet = subnetText(localIP: localIP, netmask: mask)
         let addresses = candidates(localIP: localIP, netmask: mask,
                                    previousIP: UserDefaults.standard.string(forKey: savedAddressKey))
-        for start in stride(from: 0, to: addresses.count, by: 16) {
+        guard !addresses.isEmpty else {
+            throw TailingError.protocolFailure("无法从本机地址 \(localIP)/\(mask) 生成扫描列表，请关闭自动查找并填写仪表 IP")
+        }
+        log("自动查找：本机 \(localIP)（\(interface.name)），网段 \(subnet)，候选 \(addresses.count) 个地址")
+        let denied = Counter()
+        let passes = 4
+        for pass in 1...passes {
             try check()
-            let results = Connections()
-            let group = DispatchGroup()
-            for address in addresses[start..<min(start + 16, addresses.count)] {
-                group.enter()
-                DispatchQueue.global(qos: .userInitiated).async {
-                    defer { group.leave() }
-                    var socket: TailingSocket?
-                    do {
-                        try check()
-                        let next = try track(TailingSocket.create())
-                        socket = next
-                        try next.connect(localIP: localIP, remoteIP: address, port: port, timeout: 0.4)
-                        try check()
-                        results.add(address: address, socket: next)
-                    } catch { socket?.close() }
+            if pass > 1 { log("自动查找第 \(pass)/\(passes) 轮，继续扫描 \(subnet)…") }
+            for start in stride(from: 0, to: addresses.count, by: 16) {
+                try check()
+                let results = Connections()
+                let group = DispatchGroup()
+                for address in addresses[start..<min(start + 16, addresses.count)] {
+                    group.enter()
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        defer { group.leave() }
+                        var socket: TailingSocket?
+                        do {
+                            try check()
+                            let next = try track(TailingSocket.create())
+                            socket = next
+                            try next.connect(localIP: localIP, remoteIP: address, port: port, timeout: 0.4)
+                            try check()
+                            results.add(address: address, socket: next)
+                        } catch {
+                            socket?.close()
+                            if let tailing = error as? TailingError, case .system(_, let code) = tailing, code == EPERM {
+                                denied.increment()
+                            }
+                        }
+                    }
+                }
+                group.wait()
+                let connected = results.take()
+                do { try check() }
+                catch { connected.forEach { $0.socket.close() }; throw error }
+                for address in addresses[start..<min(start + 16, addresses.count)] {
+                    if let selected = connected.first(where: { $0.address == address }) {
+                        connected.filter { $0.address != address }.forEach { $0.socket.close() }
+                        log("自动查找命中 \(address):\(port)（第 \(pass) 轮）")
+                        return selected
+                    }
                 }
             }
-            group.wait()
-            let connected = results.take()
-            do { try check() }
-            catch { connected.forEach { $0.socket.close() }; throw error }
-            for address in addresses[start..<min(start + 16, addresses.count)] {
-                if let selected = connected.first(where: { $0.address == address }) {
-                    connected.filter { $0.address != address }.forEach { $0.socket.close() }
-                    return selected
+            if pass < passes {
+                log("第 \(pass) 轮未发现仪表 10930 端口，3 秒后重试（仪表投屏页可能尚未就绪）")
+                for _ in 0..<30 {
+                    try check()
+                    Thread.sleep(forTimeInterval: 0.1)
                 }
             }
         }
-        throw TailingError.timeout("自动查找未发现仪表，请确认已连接仪表 Wi-Fi 并开启仪表投屏，或关闭自动查找后填写仪表 IP")
+        if denied.take() > 0 {
+            throw TailingError.protocolFailure("自动查找被系统拒绝访问局域网（EPERM）。请到 iPhone「设置 → 隐私与安全性 → 本地网络」把 CarWithin 打开后重试")
+        }
+        throw TailingError.timeout("自动查找未发现仪表（本机 \(localIP)，网段 \(subnet)，共 \(passes) 轮）。请确认已连接仪表 Wi-Fi 并打开仪表投屏；若刚打开投屏页，可稍等几秒再启动，或关闭自动查找后填写仪表 IP")
+    }
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func increment() { lock.lock(); value += 1; lock.unlock() }
+        func take() -> Int { lock.lock(); defer { lock.unlock() }; let result = value; value = 0; return result }
     }
 
     private final class Connections: @unchecked Sendable {
