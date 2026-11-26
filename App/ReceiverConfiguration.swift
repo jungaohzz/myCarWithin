@@ -27,6 +27,8 @@ struct ReceiverConfiguration {
     /// Head unit IPv4 for CarLife discovery; nil sweeps the local network.
     var carLifeAddress: String?
     var zeehoAddress: String?
+    /// Scan the current Wi-Fi subnet for the instrument instead of using `zeehoAddress`.
+    var zeehoAutomaticAddress = false
     /// AE2 5-inch instead of the verified 6.2-inch panel protocol profile.
     var zeehoIsAE2 = false
     var ninebotAddress: String?
@@ -145,7 +147,7 @@ struct ReceiverConfiguration {
                 throw ConfigurationError("CarLife 车机 IP 地址无效，请填写 IPv4 地址或留空。")
             }
         }
-        if let zeehoAddress {
+        if let zeehoAddress, !zeehoAutomaticAddress {
             var target = in_addr()
             guard inet_pton(AF_INET, zeehoAddress, &target) == 1, zeehoAddress != address,
                   !zeehoAddress.hasPrefix("127."), !zeehoAddress.hasPrefix("0."),

@@ -134,6 +134,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let zeehoCardStatus = UILabel()
     private let zeehoStatus = StatusLabel()
     private let zeehoAddressField = UITextField()
+    private let zeehoAutomaticSwitch = UISwitch()
     private func updateZeehoStatus(_ message: String) {
         zeehoStatus.text = message
         zeehoCardStatus.text = message
@@ -1018,7 +1019,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let showsLocalOutput = modeControl.selectedSegmentIndex != 2
         zeehoCard.isHidden = !showsLocalOutput || !outputMode.isZeeho
         zeehoCardTitleLabel?.text = outputMode == .zeehoAE2 ? "极核 AE2 5 寸连接" : "极核 6.2 寸连接"
-        if !running { updateZeehoStatus("等待启动 CarPlay · 仪表 IP：\(zeehoAddressField.text ?? "192.168.0.1")") }
+        updateZeehoCardIdleStatus()
         ninebotCard.isHidden = !showsLocalOutput || outputMode != .ninebot
         if !running { updateNinebotStatus("等待启动 CarPlay · 仪表 IP：\(ninebotAddressField.text ?? "")") }
         tailingCard.isHidden = !showsLocalOutput || outputMode != .tailing
@@ -1073,7 +1074,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         config.browserAudio = soundOutput == .browser && config.videoOutputPort != nil && outputMode == .browser
         if outputMode == .airPlay, config.videoOutputPort != nil { config.airPlayStreamID = UUID() }
         if outputMode.isZeeho {
-            config.zeehoAddress = (zeehoAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let automatic = zeehoAutomaticSwitch.isOn
+            config.zeehoAutomaticAddress = automatic
+            config.zeehoAddress = automatic ? "" : (zeehoAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             config.zeehoIsAE2 = outputMode == .zeehoAE2
         }
         if outputMode == .ninebot {
@@ -1812,7 +1815,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         bluetoothSetupSwitch.isEnabled = value
         transportProbeButton.isEnabled = value
         headUnitOutput.isEnabled = value
-        zeehoAddressField.isEnabled = value
+        zeehoAutomaticSwitch.isEnabled = value
+        zeehoAddressField.isEnabled = value && !zeehoAutomaticSwitch.isOn
         ninebotAddressField.isEnabled = value
         tailingAddressField.isEnabled = value
         carLifeAddressField.isEnabled = value
@@ -2046,6 +2050,9 @@ extension ReceiverViewController {
         zeehoAddressField.text = defaults.string(forKey: "zeehoAddress") ?? "192.168.0.1"
         zeehoAddressField.keyboardType = .decimalPad
         zeehoAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
+        // The placeholder .1 is not every AE2 Pro hotspot's address, so scanning is the default.
+        zeehoAutomaticSwitch.isOn = defaults.object(forKey: "zeehoAutomaticAddress") as? Bool ?? true
+        zeehoAutomaticSwitch.addTarget(self, action: #selector(zeehoAutomaticChanged), for: .valueChanged)
         ninebotAddressField.text = defaults.string(forKey: "ninebotAddress") ?? "192.168.1.1"
         ninebotAddressField.keyboardType = .decimalPad
         ninebotAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
@@ -2103,6 +2110,18 @@ extension ReceiverViewController {
         refreshVideoOutputSummary()
         updateVideoAspect()
         reloadVisibleSettings()
+    }
+    @objc private func zeehoAutomaticChanged() {
+        UserDefaults.standard.set(zeehoAutomaticSwitch.isOn, forKey: "zeehoAutomaticAddress")
+        zeehoAddressField.isEnabled = !zeehoAutomaticSwitch.isOn && !running
+        if !running { updateZeehoCardIdleStatus() }
+        reloadVisibleSettings()
+    }
+    private func updateZeehoCardIdleStatus() {
+        guard !running else { return }
+        updateZeehoStatus(zeehoAutomaticSwitch.isOn
+            ? "等待启动 CarPlay · 自动查找仪表 IP"
+            : "等待启动 CarPlay · 仪表 IP：\(zeehoAddressField.text ?? "")")
     }
     @objc private func audioSettingChanged() {
         UserDefaults.standard.set(selectedSoundOutput.rawValue, forKey: "soundOutput")
@@ -2717,12 +2736,14 @@ extension ReceiverViewController {
             case .airPlay: return airPlayOutputSections()
             case .tailing: return tailingOutputSections()
             case .zeeho:
-                return [SettingsSection("极核 AE4 MAX2+ 6.2 寸", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。声音由 iPhone 或蓝牙输出。", [
+                return [SettingsSection("极核 AE4 MAX2+ 6.2 寸", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。自动查找会扫描当前 Wi-Fi 网段（约几秒）；关闭后可填写仪表实际 IP。声音由 iPhone 或蓝牙输出。", [
+                    .control("自动查找仪表 IP", icon: ("network", .systemBlue), zeehoAutomaticSwitch),
                     .field("仪表 IP 地址", zeehoAddressField, placeholder: "192.168.0.1"),
                     .note(zeehoStatus)
                 ])]
             case .zeehoAE2:
-                return [SettingsSection("极核 AE2 5 寸（如 AE2 Pro）", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。画面尺寸与帧率按仪表上报自动适配（最高 60 FPS）。声音由 iPhone 或蓝牙输出。", [
+                return [SettingsSection("极核 AE2 5 寸（如 AE2 Pro）", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。自动查找会扫描当前 Wi-Fi 网段（约几秒）；关闭后可填写仪表实际 IP。画面尺寸与帧率按仪表上报自动适配（最高 60 FPS）。声音由 iPhone 或蓝牙输出。", [
+                    .control("自动查找仪表 IP", icon: ("network", .systemBlue), zeehoAutomaticSwitch),
                     .field("仪表 IP 地址", zeehoAddressField, placeholder: "192.168.0.1"),
                     .note(zeehoStatus)
                 ])]

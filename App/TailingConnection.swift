@@ -41,7 +41,7 @@ struct TailingPorts {
 /// 台铃 JPEG 和极核 H.264 共用的 PXC 投屏会话。
 final class TailingConnection: @unchecked Sendable {
     private let localIP: String
-    private let targetIP: String
+    private var targetIP: String
     private let profile: TailingDisplayProfile
     private let phone: TailingPhoneInfo
     private let ports: TailingPorts
@@ -81,6 +81,18 @@ final class TailingConnection: @unchecked Sendable {
     func start() throws {
         let loaded = try identityProvider()
         condition.lock(); identity = loaded; condition.unlock()
+        // Empty address: scan the phone's own subnet for the instrument's announcement port.
+        // The default 192.168.0.1 is only a placeholder; AE2 Pro hotspots do not all use it.
+        var discoveredSocket: TailingSocket?
+        if targetIP.isEmpty && isZeeho {
+            log("极核正在自动查找仪表 IP，本机 Wi-Fi 地址 \(localIP)")
+            let discovered = try TailingDiscovery.connect(localIP: localIP, port: ports.announcement,
+                track: { [self] in try tracked($0) }, check: { [self] in try checkHealth() })
+            targetIP = discovered.address
+            discoveredSocket = discovered.socket
+            log("极核发现仪表候选地址 \(targetIP)，正在验证投屏请求")
+        }
+        try checkHealth()
         // 先全部监听，再请求仪表反向连接；不使用所有网卡的通配地址。
         var listeners: [(UInt16, TailingSocket)] = []
         for port in [ports.control, ports.auxiliary, ports.video] {
@@ -92,9 +104,10 @@ final class TailingConnection: @unchecked Sendable {
             DispatchQueue.global(qos: .userInitiated).async { [self] in accept(server, port: port) }
         }
         log("\(dashboard) TCP 已监听 \(localIP):\(ports.control)/\(ports.auxiliary)/\(ports.video)，正在协商")
-        let announcement = try tracked(TailingSocket.create())
+        let announcement: TailingSocket
+        if let discoveredSocket { announcement = discoveredSocket }
+        else { announcement = try openAnnouncement() }
         defer { announcement.close() }
-        try announcement.connect(localIP: localIP, remoteIP: targetIP, port: ports.announcement)
         try announcement.write(TailingProtocol.control(0x70000010, payload: TailingProtocol.json([
             "phoneType": "iOS", "packageName": phone.package
         ])))
@@ -110,7 +123,32 @@ final class TailingConnection: @unchecked Sendable {
             if !condition.wait(until: deadline) { throw TailingError.timeout("媒体会话未就绪，请退出官方投屏并重新开启仪表投屏") }
         }
         try checkLocked()
+        if isZeeho {
+            UserDefaults.standard.set(targetIP, forKey: TailingDiscovery.savedAddressKey)
+            log("极核仪表连接地址 \(targetIP)，媒体协商通过")
+        }
         log("\(dashboard) 媒体协商完成，等待仪表逐帧请求")
+    }
+
+    /// Manual address: retry the probe a few times; a just-joined Wi-Fi can drop the first SYNs.
+    private func openAnnouncement() throws -> TailingSocket {
+        var lastError: Error?
+        for attempt in 1...3 {
+            let socket = try tracked(TailingSocket.create())
+            do {
+                try socket.connect(localIP: localIP, remoteIP: targetIP, port: ports.announcement)
+                return socket
+            } catch {
+                socket.close()
+                lastError = error
+                log("\(dashboard) 探测仪表 \(targetIP):\(ports.announcement) 第 \(attempt) 次失败：\(error.localizedDescription)")
+                if let tailing = error as? TailingError, case .system(_, let code) = tailing, code == EPERM {
+                    log("系统拒绝访问局域网（EPERM）。请到 iPhone「设置 → 隐私与安全性 → 本地网络」把 CarWithin 打开后重试。")
+                }
+                if attempt < 3 { Thread.sleep(forTimeInterval: 1.2) }
+            }
+        }
+        throw lastError ?? TailingError.timeout("探测仪表 \(targetIP):\(ports.announcement)")
     }
 
     @discardableResult
@@ -409,8 +447,9 @@ final class TailingConnection: @unchecked Sendable {
                       echoed == signature else { throw TailingError.protocolFailure("媒体身份回显不匹配") }
                 try identity.verify(echoed, huid: huid)
                 payload.appendLE(UInt32(isZeeho ? 2 : 1))
-                let replyWidth = profile.acceptsReportedSize ? Int(width) : profile.width
-                let replyHeight = profile.acceptsReportedSize ? Int(height) : profile.height
+                // H.264 4:2:0 needs even edges; the instrument accepts the aligned size back.
+                let replyWidth = profile.acceptsReportedSize ? max(2, Int(width) & ~1) : profile.width
+                let replyHeight = profile.acceptsReportedSize ? max(2, Int(height) & ~1) : profile.height
                 payload.appendLE(UInt16(replyWidth))
                 payload.appendLE(UInt16(replyHeight))
                 response = 0x11
