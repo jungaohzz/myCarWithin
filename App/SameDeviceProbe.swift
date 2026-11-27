@@ -31,6 +31,10 @@ final class SameDeviceProbe {
     private var experimentWifiOnly = false
     private var experimentSkipWifi = false
     private var experimentLoopback = false
+    // 0x4300 提供的传输标识：系统为本机端点生成的值，0x4301 匹配实验用它回填参数 3。
+    private var availableTransports: [(type: UInt8, identifier: String)] = []
+    private var experimentMatchIdent = false
+    private var experimentAccSelfAuth = true
     var onLog: ((String) -> Void)?
 
     private func hexPreview(_ data: Data, limit: Int = 96) -> String {
@@ -50,12 +54,20 @@ final class SameDeviceProbe {
         experimentWifiOnly = defaults.bool(forKey: "localWifiOnlyIdent")
         experimentSkipWifi = defaults.bool(forKey: "localSkipWifi")
         experimentLoopback = defaults.bool(forKey: "localLoopbackSession")
+        experimentMatchIdent = defaults.bool(forKey: "localMatch4300Ident")
+        experimentAccSelfAuth = defaults.object(forKey: "localAccSelfAuth") as? Bool ?? true
         effectiveTransportType = experimentTransportType
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let wifi = configuration.ssid.isEmpty ? "Wi-Fi 未填写"
             : "Wi-Fi \(configuration.ssid)/信道 \(configuration.wifiChannel)/\(configuration.password.isEmpty ? "开放网络" : "密码 \(configuration.password.utf8.count) 字节")"
-        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")，0x4301 目标=127.0.0.1=\(experimentLoopback ? "是" : "否")")
+        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")，0x4301 目标=127.0.0.1=\(experimentLoopback ? "是" : "否")，0x4301 标识回填 0x4300=\(experimentMatchIdent ? "是" : "否")，ACC 自证=\(experimentAccSelfAuth ? "开" : "关")")
         onLog?("本机传输能力（CoreAccessories）：" + String(DirectAccessoryTransport.apiSummary().prefix(1500)))
+        // 0x4300 的系统生成标识长得像 en0 MAC（28:02:44:b1:2b:c2）；把本机 MAC 打出来比对。
+        // iOS 可能对 App 返回 02:00:00:00:00:00，这本身也是证据。
+        onLog?("本机 en0 MAC · \(ReceiverConfiguration.wifiMACAddress() ?? "读取失败")（用于比对 0x4300 系统生成标识）")
+        transport.onDiagnostic = { [weak self] message in
+            self?.onLog?(message)
+        }
         if !AppLog.localCarPlaySupport.supported { onLog?("警告：\(AppLog.localCarPlaySupport.summary)") }
         let run = generation
         transport.onData = { [weak self] data in self?.receive(data) }
@@ -70,6 +82,7 @@ final class SameDeviceProbe {
                 try transport.start(withIdentifier: configuration.deviceID, transportType: 2)
             }
             stage("已创建本机配件端点（传输类型 \(effectiveTransportType)，CoreAccessories 连接类型 \(transport.connectionTypeDescription ?? "?")），正在建立 iAP2")
+            transport.dumpConnectionState("端点创建后基线")
             startHeartbeat()
             try transport.send(IAP2Packet.presence)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
@@ -100,6 +113,7 @@ final class SameDeviceProbe {
         heartbeatTimer?.cancel(); heartbeatTimer = nil
         identity = nil; configuration = nil; messageBytes = Data(); sequence = 0x10; acknowledgement = 0
         session = 1; lastPayloadSequence = nil; linked = false; authenticated = false; identified = false; requested = false; controlConnected = false
+        availableTransports = []
         sessionRequests = 0; packetsReceived = 0; messagesReceived = 0; chunksReceived = 0; startedAt = .now()
     }
 
@@ -113,7 +127,7 @@ final class SameDeviceProbe {
             guard let self, self.active else { return }
             beats += 1
             let live = ReceiverConfiguration.wifiIPv4Address() ?? "无 en0 地址"
-            self.onLog?("本机 iAP2 心跳 #\(beats)：包 \(self.packetsReceived)/消息 \(self.messagesReceived)，链路=\(self.linked ? "是" : "否")，认证=\(self.authenticated ? "是" : "否")，识别=\(self.identified ? "是" : "否")，0x4301 已发 \(self.sessionRequests) 次，控制连接=\(self.controlConnected ? "是" : "否")，当前 en0=\(live)")
+            self.onLog?("本机 iAP2 心跳 #\(beats)：包 \(self.packetsReceived)/消息 \(self.messagesReceived)，链路=\(self.linked ? "是" : "否")，认证=\(self.authenticated ? "是" : "否")，识别=\(self.identified ? "是" : "否")，0x4301 已发 \(self.sessionRequests) 次，控制连接=\(self.controlConnected ? "是" : "否")，\(self.transport.authSummary())，当前 en0=\(live)")
         }
         timer.resume()
         heartbeatTimer = timer
@@ -139,16 +153,25 @@ final class SameDeviceProbe {
                 onLog?("警告：0x4301 告知的地址 \(configuration.address) 与当前 en0 \(live) 不一致；守护进程若按此地址回连会连到错误主机")
             }
         }
+        // 0x4301 匹配实验：参数 3 的设备标识默认是 App 自己的配件 MAC；实验时回填 0x4300
+        // 里系统给出的标识（优先 MAC 样式），检验守护进程是否按这个值匹配端点。
+        var deviceID = configuration.deviceID
+        if experimentMatchIdent, !availableTransports.isEmpty {
+            let macStyle = availableTransports.first { $0.identifier.contains(":") }?.identifier
+                ?? availableTransports[0].identifier
+            onLog?("0x4301 标识实验：参数 3 回填 0x4300 提供的 \(macStyle)（原 \(configuration.deviceID)）")
+            deviceID = macStyle
+        }
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt.uptimeNanoseconds) / 1_000_000_000
         let wifiText = wifi.map {
             "Wi-Fi \($0.ssid)（信道 \(Int($0.channel))，\($0.password.isEmpty ? "开放" : "密码 \($0.password.utf8.count) 字节")）"
         } ?? "不携带 Wi-Fi 组（实验）"
         onLog?(String(format: "第 %d 次发送 0x4301 启动 CarPlay（启动后 %.1f 秒）：目标 %@:%d，%@，标识 %@，认证=%@，识别=%@%@",
             sessionRequests, elapsed, target, Int(configuration.port), wifiText,
-            configuration.deviceID, authenticated ? "是" : "否", identified ? "是" : "否",
+            deviceID, authenticated ? "是" : "否", identified ? "是" : "否",
             experimentLoopback ? "，回环实验（真实监听地址 \(configuration.address)）" : ""))
         try send(AccessoryMessages.startSession(address: target, port: configuration.port,
-            deviceID: configuration.deviceID, wifi: wifi))
+            deviceID: deviceID, wifi: wifi))
     }
     private func stage(_ message: String) { onLog?(message); onStage?(message) }
     private func finish(_ message: String) {
@@ -235,7 +258,12 @@ final class SameDeviceProbe {
             guard let challenge = message.parameters.first(where: { $0.id == 0 })?.value else { throw ProtocolError.malformed("缺少认证挑战") }
             try send(IAP2Message(id: 0xaa03, parameters: [IAP2Parameter(id: 0, value: identity.sign(challenge: challenge))]))
         case 0xaa04: finish("iOS 拒绝了配件认证（0xAA04）")
-        case 0xaa05: authenticated = true; stage("iOS 已接受配件认证")
+        case 0xaa05:
+            authenticated = true; stage("iOS 已接受配件认证")
+            // iAP2 层认证刚通过：此刻 CoreAccessories 的连接级认证状态是最关键的证据，
+            // 也是自证实验（把连接标成已认证）的最佳时机。
+            transport.dumpConnectionState("iAP2 认证通过后")
+            if experimentAccSelfAuth { transport.attemptSelfAuthentication() }
         case 0x1d00: try send(AccessoryMessages.identification(name: configuration.name, deviceID: configuration.deviceID,
                                                               wifiOnly: experimentWifiOnly))
         case 0x1d02: identified = true; stage("iOS 已接受配件识别，正在等待 CarPlay 可用通知")
@@ -244,14 +272,24 @@ final class SameDeviceProbe {
             finish("iOS 拒绝了配件识别（0x1D03）：\(rejected)")
         case 0x4300:
             guard authenticated, identified else { throw ProtocolError.malformed("认证或识别完成前收到 CarPlay 可用通知") }
+            var transports: [(type: UInt8, identifier: String)] = []
             for group in message.parameters {
                 let nested = try IAP2Parameter.parse(group.value)
                 if let value = nested.first(where: { $0.id == 0 })?.value.first {
                     let fields = nested.map { "\($0.id)=\($0.value.count)字节/\(hexPreview($0.value, limit: 32))" }
                         .joined(separator: "；")
                     onLog?("CarPlay 可用传输 \(group.id)：type=\(value)（\(fields)）")
+                    if let identifier = nested.first(where: { $0.id == 1 })?.value,
+                       let text = String(data: identifier, encoding: .utf8) {
+                        transports.append((value, text.trimmingCharacters(in: CharacterSet(charactersIn: "\0"))))
+                    }
                 }
             }
+            availableTransports = transports
+            if !transports.isEmpty {
+                onLog?("0x4300 系统生成标识：\(transports.map { "type=\($0.type)/\($0.identifier)" }.joined(separator: "，"))")
+            }
+            transport.dumpConnectionState("收到 0x4300 后")
             if controlConnected || (!expectsLocalControl && requested) {
                 onLog?("0x4300：已有控制连接或已请求过会话，跳过重复 0x4301（控制连接=\(controlConnected)）")
                 return

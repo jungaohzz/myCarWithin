@@ -136,8 +136,17 @@ final class CarPlayMediaSession {
     }
     /// Momentary HID key: the press report followed by the all-released report.
     func pressHID(_ uuid: String, _ report: Data, release: Data) {
-        guard sendHID(uuid, report, label: "按键") else { onLog?("按键未发送：事件通道尚未连接"); return }
-        _ = sendHID(uuid, release, label: "按键")
+        guard sendHID(uuid, report, label: "按键") else {
+            ButtonLog.record("App 发键失败 · 设备 \(uuid) · 按下 \(Self.hex(report)) · 事件通道未连接")
+            onLog?("按键未发送：事件通道尚未连接")
+            return
+        }
+        let released = sendHID(uuid, release, label: "按键")
+        ButtonLog.record("App 发键 · 设备 \(uuid) · 按下 \(Self.hex(report)) · 松开 \(Self.hex(release))\(released ? "" : " · 松开发送失败")")
+    }
+
+    private static func hex(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
     }
     func requestSiri() {
         guard sendCommand(["type": "requestSiri", "params": ["siriAction": 2]], label: "Siri") else {

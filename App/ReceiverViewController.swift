@@ -18,6 +18,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let receiverBrowser = TDSCarKitReceiverBrowser()
     private let receiverPicker = UIButton(type: .system)
     private var remoteTarget: TDSCarKitReceiverBrowser.Target?
+    private var notifiedControlSession = false
     private let modeControl = UISegmentedControl(items: ["接收其他设备", "本机 CarPlay", "投送到 iPad"])
     private let nameField = UITextField()
     private let ipField = UITextField()
@@ -186,6 +187,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let localTransportControl = ChoiceMenu(items: ["2（默认）", "3（实验）", "8（实验）"])
     private let localWifiOnlySwitch = UISwitch()
     private let localSkipWifiSwitch = UISwitch()
+    private let localMatch4300Switch = UISwitch()
+    /// ACC 连接级自证实验：把 CoreAccessories 的连接标记成“已认证”，默认开启。
+    private let localAccSelfAuthSwitch = UISwitch()
     private let localLoopbackControl = ChoiceMenu(items: ["自动（en0）", "127.0.0.1（实验）"])
     private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife", "AirPlay", "台铃 4.3 寸", "九号 5 寸", "极核 6.2 寸", "极核 AE2 5 寸"])
     private enum HeadUnitOutput: Int {
@@ -551,7 +555,16 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             stack.widthAnchor.constraint(lessThanOrEqualToConstant: 720)
         ])
         receiver.onLog = { [weak self] in self?.log($0) }; bluetooth.onLog = { [weak self] in self?.log($0) }
-        receiver.onControlConnected = { [weak self] in self?.sameDevice.didConnectControl() }
+        // 回连自测会短暂连上监听端口再关闭，不协商 RTSP；只有真正开始 SETUP 的连接
+        // 才是 carplayd 的回连，避免它把 controlConnected 置真、永久跳过 0x4301。
+        receiver.onSessionEstablished = { [weak self] in
+            guard let self else { return }
+            if !self.notifiedControlSession {
+                self.notifiedControlSession = true
+                self.log("确认收到真正的 CarPlay 控制会话（已进入 RTSP 协商）")
+                self.sameDevice.didConnectControl()
+            }
+        }
         receiver.onVideo = { [weak self] data, codec in
             guard let self, self.running else { return }
             // Nothing local is visible in the background without PiP: save the decoding work.
@@ -884,8 +897,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         defaults.set(transport, forKey: "localTransportType")
         defaults.set(localWifiOnlySwitch.isOn, forKey: "localWifiOnlyIdent")
         defaults.set(localSkipWifiSwitch.isOn, forKey: "localSkipWifi")
+        defaults.set(localMatch4300Switch.isOn, forKey: "localMatch4300Ident")
+        defaults.set(localAccSelfAuthSwitch.isOn, forKey: "localAccSelfAuth")
         defaults.set(loopback, forKey: "localLoopbackSession")
-        log("本机 CarPlay 实验设置：传输类型 \(transport)，0x1D01 仅 Wi-Fi 声明=\(localWifiOnlySwitch.isOn ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(localSkipWifiSwitch.isOn ? "是" : "否")，0x4301 目标=127.0.0.1=\(loopback ? "是" : "否")；下一次启动本机 CarPlay 生效")
+        log("本机 CarPlay 实验设置：传输类型 \(transport)，0x1D01 仅 Wi-Fi 声明=\(localWifiOnlySwitch.isOn ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(localSkipWifiSwitch.isOn ? "是" : "否")，0x4301 目标=127.0.0.1=\(loopback ? "是" : "否")，0x4301 标识回填 0x4300=\(localMatch4300Switch.isOn ? "是" : "否")，ACC 自证=\(localAccSelfAuthSwitch.isOn ? "开" : "关")；下一次启动本机 CarPlay 生效")
     }
     @objc private func appearanceChanged() {
         UserDefaults.standard.set(appearanceControl.selectedSegmentIndex, forKey: "carPlayAppearance")
@@ -1649,6 +1664,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             UIApplication.shared.isIdleTimerDisabled = true
             let startupID = UUID()
             localStartupID = startupID
+            notifiedControlSession = false
             let support = AppLog.localCarPlaySupport
             log("启动本机 CarPlay · \(support.summary) · 本机回调 \(address):\(config.port) · 预设 Wi-Fi \(config.ssid.isEmpty ? "未填写" : config.ssid)/信道 \(config.wifiChannel)/\(config.password.isEmpty ? "开放" : "密码 \(config.password.utf8.count) 字节") · 分辨率 \(config.width)×\(config.height) @ \(config.maxFPS) FPS · \(config.videoCodec.displayName)")
             logCurrentWiFi(configured: config.ssid)
@@ -1659,6 +1675,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 self.controlBrowser.start()
                 // 证据链：daemon 是否在跑 → 端口能不能回连 → daemon 有没有发包 → 系统日志说了什么。
                 SystemDiagnostics.shared.kickstartCarPlayDaemon()
+                SystemDiagnostics.shared.probeCarPlayXPC()
                 SystemDiagnostics.shared.selfConnectTest(port: port)
                 let loopback = UserDefaults.standard.bool(forKey: "localLoopbackSession")
                 SystemDiagnostics.shared.captureNetwork(interface: loopback ? "lo0" : "en0", seconds: 70)
@@ -2112,6 +2129,10 @@ extension ReceiverViewController {
         localWifiOnlySwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
         localSkipWifiSwitch.isOn = defaults.bool(forKey: "localSkipWifi")
         localSkipWifiSwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
+        localMatch4300Switch.isOn = defaults.bool(forKey: "localMatch4300Ident")
+        localMatch4300Switch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
+        localAccSelfAuthSwitch.isOn = defaults.object(forKey: "localAccSelfAuth") as? Bool ?? true
+        localAccSelfAuthSwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
         localLoopbackControl.selectedSegmentIndex = defaults.bool(forKey: "localLoopbackSession") ? 1 : 0
         localLoopbackControl.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
         let savedOutput = defaults.object(forKey: "headUnitOutputV2") as? Int
@@ -3074,6 +3095,26 @@ extension ReceiverViewController {
             }
             sections.append(SettingsSection("文本日志", footer: "每次启动 App 生成一个文件，包含时间、网络接口和各个连接的详细过程。点按可发送（选微信即可发给他人），左滑可删除；最多保留最近 30 个文件。", actions))
             sections.append(SettingsSection("日志文件", logFileRows()))
+            var buttonActions = [
+                SettingsRow.action("收集按键日志 60 秒", icon: ("hand.tap.fill", .systemGreen)) { [unowned self] in
+                    SystemDiagnostics.shared.collectButtonLogs(seconds: 60)
+                    self.alert("已开始收集", "请在这 60 秒内按下车上的方向盘或中控按键，结束后用「发送最新按键日志」导出。")
+                },
+                SettingsRow.action("收集按键日志 180 秒", icon: ("hand.tap.fill", .systemIndigo)) { [unowned self] in
+                    SystemDiagnostics.shared.collectButtonLogs(seconds: 180)
+                    self.alert("已开始收集", "请在这 180 秒内按下车上的方向盘或中控按键，结束后用「发送最新按键日志」导出。")
+                },
+                SettingsRow.action("发送最新按键日志", icon: ("square.and.arrow.up.fill", .systemGreen)) { [unowned self] in
+                    self.shareLog(ButtonLog.shared.currentFile)
+                }
+            ]
+            if !ButtonLog.shared.files().isEmpty {
+                buttonActions.append(.action("删除全部按键日志", icon: ("trash.fill", .systemRed), destructive: true) { [unowned self] in
+                    self.confirmDeleteButtonLogs()
+                })
+            }
+            sections.append(SettingsSection("按键日志", footer: "独立文件，只收集 HID/按键相关行：系统统一日志中的 HID、键盘、旋钮、方向盘、iAP2 配件，以及 App 自己发出的 HID 报告。投屏成功后开始收集，按下车上按键，再导出分析。每次收集生成一个新文件，最多保留 20 个。", buttonActions))
+            sections.append(SettingsSection("按键日志文件", buttonLogFileRows()))
             return sections
         }
         logView.constraints.filter { $0.firstAttribute == .height }.forEach { $0.constant = 380 }
@@ -3098,6 +3139,30 @@ extension ReceiverViewController {
         }
     }
 
+    private func buttonLogFileRows() -> [SettingsRow] {
+        let files = ButtonLog.shared.files()
+        guard !files.isEmpty else { return [.note("暂无按键日志文件。")] }
+        return files.map { url in
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
+            var row = SettingsRow.action(url.lastPathComponent, icon: ("doc.text.fill", .systemGreen)) { [unowned self] in
+                self.shareLog(url)
+            }
+            row.subtitle = { "\(size >= 1024 ? "\(size / 1024) KB" : "\(size) B") · 点按发送" }
+            row.onDelete = { ButtonLog.shared.delete(url); self.reloadVisibleSettings() }
+            return row
+        }
+    }
+
+    private func confirmDeleteButtonLogs() {
+        let sheet = UIAlertController(title: "删除全部按键日志？", message: "删除后无法恢复。", preferredStyle: .alert)
+        sheet.addAction(UIAlertAction(title: "删除", style: .destructive) { [unowned self] _ in
+            ButtonLog.shared.deleteAll()
+            self.reloadVisibleSettings()
+        })
+        sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
+        (settingsNavigation ?? self).present(sheet, animated: true)
+    }
+
     private func shareLog(_ url: URL) {
         guard FileManager.default.fileExists(atPath: url.path) else {
             alert("日志文件不存在", "可能已被删除。")
@@ -3120,10 +3185,12 @@ extension ReceiverViewController {
     }
 
     private func experimentSections() -> [SettingsSection] {
-        var sections = [SettingsSection("iOS 15 本机 CarPlay 实验", footer: "iAP2 握手与 0x4301 在 iOS 15.6 已全部成功，但系统 CarPlay 守护进程从不回连。这些开关逐项改变配件声明与 0x4301 的组合，用来定位守护进程的判定条件；修改后下一次启动本机 CarPlay 才生效，日志会记录实际组合。传输类型 3 对应 0x4300 里声明的值，8 为旧实验，失败都会自动回退 2。每次本机 CarPlay 启动还会：尝试 kickstart carplayd、自测回连端口、抓包 70 秒、实时记录系统日志 60 秒、12 秒后扫描崩溃报告/偏好/launchctl/进程表/carplayd 二进制。读取失败同样写入日志。", [
+        var sections = [SettingsSection("iOS 15 本机 CarPlay 实验", footer: "iAP2 握手与 0x4301 在 iOS 15.6 已全部成功，但系统 CarPlay 守护进程从不回连。这些开关逐项改变配件声明与 0x4301 的组合，用来定位守护进程的判定条件；修改后下一次启动本机 CarPlay 才生效，日志会记录实际组合。传输类型 3 对应 0x4300 里声明的值，8 为旧实验，失败都会自动回退 2。0x4301 标识回填：参数 3 改用 0x4300 里系统生成的标识（优先 MAC 样式）。ACC 自证：iAP2 认证通过后尝试把 CoreAccessories 的连接级认证标志置为已认证。每次本机 CarPlay 启动还会：安装 ACC 委托探针并快照连接状态/属性/签名、尝试 kickstart carplayd、自测回连端口、抓包 70 秒、OSLogStore 与命令行双通道记录系统日志 60 秒、XPC 探测候选守护进程、12 秒后扫描崩溃报告/偏好/launchctl/进程表/carplayd 二进制。读取失败同样写入日志。", [
             .control("本机传输类型", icon: ("cable.connector", .systemIndigo), localTransportControl),
             .control("0x1D01 仅声明 Wi-Fi 传输", icon: ("wifi", .systemBlue), localWifiOnlySwitch),
             .control("0x4301 跳过 Wi-Fi 凭据", icon: ("key.slash", .systemOrange), localSkipWifiSwitch),
+            .control("0x4301 标识回填 0x4300", icon: ("shippingbox.fill", .systemBrown), localMatch4300Switch),
+            .control("ACC 连接自证尝试", icon: ("checkmark.seal.fill", .systemMint), localAccSelfAuthSwitch),
             .control("0x4301 目标地址", icon: ("arrow.triangle.2.circlepath", .systemPurple), localLoopbackControl),
             .action("扫描系统诊断（崩溃报告 / 偏好 / 日志）", icon: ("stethoscope", .systemTeal)) { [unowned self] in
                 SystemDiagnostics.shared.scan(reason: "手动扫描")

@@ -232,3 +232,105 @@ final class AppLog: @unchecked Sendable {
         }
     }
 }
+
+/// 按键日志：独立于文本日志的文件，只收 HID/按键证据。来源有两个：系统统一日志里与
+/// HID、键盘、旋钮、方向盘等相关的行（车机按键会经过 carplayd/BackBoard），以及 App
+/// 自己发出的 HID 报告（作为格式参照）。每次收集换一个新文件，便于单独导出分析。
+final class ButtonLog: @unchecked Sendable {
+    static let shared = ButtonLog()
+
+    let directory: URL
+    private let queue = DispatchQueue(label: "CarWithin.buttonlog", qos: .utility)
+    private let formatter: DateFormatter
+    private let stampFormatter: DateFormatter
+    private var handle: FileHandle?
+    private var currentURL: URL
+    private let maximumFiles = 20
+
+    private init() {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        directory = documents.appendingPathComponent("Logs/ButtonLogs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyyMMdd-HHmmss"
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stampFormatter = stamp
+        let line = DateFormatter()
+        line.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS Z"
+        line.locale = Locale(identifier: "en_US_POSIX")
+        formatter = line
+        currentURL = directory.appendingPathComponent("Keys-\(stamp.string(from: Date())).txt")
+        prune()
+        open()
+    }
+
+    static func record(_ message: String) { shared.write(message) }
+
+    var currentFile: URL { queue.sync { currentURL } }
+
+    /// 每次收集换一个新文件，导出的就是这一次按键测试的内容。
+    func startSession() {
+        queue.sync {
+            try? handle?.close(); handle = nil
+            currentURL = directory.appendingPathComponent("Keys-\(stampFormatter.string(from: Date())).txt")
+            open()
+            prune()
+        }
+    }
+
+    /// Newest first.
+    func files() -> [URL] {
+        queue.sync {
+            ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "txt" }
+                .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        }
+    }
+
+    func deleteAll() {
+        queue.sync {
+            try? handle?.close(); handle = nil
+            let names = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+            names.forEach { try? FileManager.default.removeItem(at: $0) }
+            currentURL = directory.appendingPathComponent("Keys-\(stampFormatter.string(from: Date())).txt")
+            open()
+        }
+    }
+
+    func delete(_ url: URL) {
+        queue.sync {
+            if url == currentURL {
+                try? handle?.close(); handle = nil
+                try? FileManager.default.removeItem(at: url)
+                open()
+                return
+            }
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private func open() {
+        _ = FileManager.default.createFile(atPath: currentURL.path, contents: nil)
+        handle = try? FileHandle(forWritingTo: currentURL)
+    }
+
+    private func prune() {
+        let existing = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "txt" }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        for url in existing.dropFirst(maximumFiles - 1) { try? FileManager.default.removeItem(at: url) }
+    }
+
+    private func write(_ message: String) {
+        let text = message.trimmingCharacters(in: .newlines)
+        guard !text.isEmpty else { return }
+        queue.async { [self] in
+            guard let handle else { return }
+            let stamp = formatter.string(from: Date())
+            var entry = "\(stamp)  \(text)\n"
+            for part in text.split(separator: "\n").dropFirst() { entry += "\(stamp)  \(part)\n" }
+            if let data = entry.data(using: .utf8) { try? handle.write(contentsOf: data) }
+        }
+        NSLog("[CarWithin按键] %@", text)
+    }
+}

@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import OSLog
 
 /// Evidence from outside the app: iOS keeps crash reports, daemon preferences, a process table,
 /// launchd state and a unified log for CarPlay. The build is TrollStore-signed with
@@ -40,10 +41,12 @@ final class SystemDiagnostics: @unchecked Sendable {
     /// iOS SDK 对 Swift 屏蔽了 Foundation.Process 和 popen/pclose，posix_spawn 是拉起
     /// /bin/sh 的唯一通道。读取设成非阻塞，这样即使被探测的命令不输出，
     /// 也不会卡死扫描队列。waitpid 阻塞回收与 pclose 语义一致：命令自带退出机制。
-    private func run(command: String, maxSeconds: TimeInterval, maxLines: Int, tag: String) {
+    private func run(command: String, maxSeconds: TimeInterval, maxLines: Int, tag: String,
+                     scope: String = "系统诊断",
+                     record: (String) -> Void = { AppLog.record($0) }) {
         var fds = [Int32](repeating: 0, count: 2)
         guard pipe(&fds) == 0 else {
-            AppLog.record("系统诊断 · \(tag)：pipe 失败（errno \(errno)）")
+            record("\(scope) · \(tag)：pipe 失败（errno \(errno)）")
             return
         }
         let readFd = fds[0]
@@ -61,7 +64,7 @@ final class SystemDiagnostics: @unchecked Sendable {
             posix_spawn_file_actions_destroy(&fileActions)
             close(readFd)
             close(writeFd)
-            AppLog.record("系统诊断 · \(tag)：spawn 参数复制失败（内存不足）")
+            record("\(scope) · \(tag)：spawn 参数复制失败（内存不足）")
             return
         }
         defer { free(shPath); free(dashC); free(commandC) }
@@ -73,7 +76,7 @@ final class SystemDiagnostics: @unchecked Sendable {
         close(writeFd)
         guard spawnResult == 0 else {
             close(readFd)
-            AppLog.record("系统诊断 · \(tag)：posix_spawn 失败（错误码 \(spawnResult)，进程启动被拒绝）")
+            record("\(scope) · \(tag)：posix_spawn 失败（错误码 \(spawnResult)，进程启动被拒绝）")
             return
         }
 
@@ -103,7 +106,7 @@ final class SystemDiagnostics: @unchecked Sendable {
                 guard !text.isEmpty else { continue }
                 totalBytes += text.utf8.count
                 if lines < maxLines {
-                    AppLog.record("\(tag)｜\(text.prefix(300))")
+                    record("\(tag)｜\(text.prefix(300))")
                     lines += 1
                 }
             }
@@ -112,7 +115,7 @@ final class SystemDiagnostics: @unchecked Sendable {
         close(readFd)
         var status: Int32 = 0
         _ = waitpid(pid, &status, 0)
-        AppLog.record("系统诊断 · \(tag) 结束：输出 \(lines) 行 / \(totalBytes) 字节")
+        record("\(scope) · \(tag) 结束：输出 \(lines) 行 / \(totalBytes) 字节")
     }
 
     // MARK: 路径与崩溃报告
@@ -225,24 +228,161 @@ final class SystemDiagnostics: @unchecked Sendable {
             maxSeconds: 15, maxLines: 120, tag: "carplayd 二进制")
     }
 
+    // MARK: 统一日志（OSLogStore API 通道）
+
+    /// posix_spawn 在 iOS 15.6 的 TrollStore 环境里拿不到 /bin/sh（ENOENT），命令行日志通道
+    /// 整体失效。OSLogStore 是 iOS 15 的公开 API，进程内直接读统一日志，不经过任何外部
+    /// 进程：system 域若被拒就退回本进程域，两种结果都写进日志作为证据。
+    private func openUnifiedLogStore() -> OSLogStore? {
+        do {
+            let store = try OSLogStore(scope: .system)
+            AppLog.record("OSLogStore · system 域已打开（进程内读统一日志，不依赖命令行工具）")
+            return store
+        } catch {
+            AppLog.record("OSLogStore · system 域打开失败：\(error.localizedDescription)")
+        }
+        do {
+            let store = try OSLogStore(scope: .currentProcessIdentifier)
+            AppLog.record("OSLogStore · 退回本进程域（只能看到本进程，看不到 carplayd）")
+            return store
+        } catch {
+            AppLog.record("OSLogStore · 本进程域也打开失败：\(error.localizedDescription)（统一日志 API 通道不可用）")
+            return nil
+        }
+    }
+
+    /// 每次扫描各自创建：scan 的 queue 与 streamLogs 的 captureQueue 会并发调用，
+    /// DateFormatter 不是线程安全的，不能共享缓存实例。
+    private func makeEntryStamp() -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }
+
+    private func formatUnifiedLine(_ entry: OSLogEntry, stamp: DateFormatter) -> String {
+        let time = stamp.string(from: entry.date)
+        if let log = entry as? OSLogEntryLog {
+            return "\(time) [\(log.process)｜\(log.subsystem)/\(log.category)] \(log.composedMessage)"
+        }
+        return "\(time) \(String(describing: entry))"
+    }
+
+    /// 反向迭代（从新到旧）而不是正向：正向走到日志头部时迭代器可能等待新条目，
+    /// 反向永远在历史里走，条数/时间窗先到即停，每次扫描都有界。
+    /// 返回本轮收集到的条数；读取失败也记一行，失败本身是证据。
+    @discardableResult
+    private func sweepUnifiedLog(store: OSLogStore, predicate: NSPredicate, since: TimeInterval,
+                                 maxEntries: Int, tag: String, record: (String) -> Void) -> Int {
+        do {
+            let windowStart = Date().addingTimeInterval(-since)
+            let position = store.position(date: windowStart)
+            let enumerator = try store.getEntries(with: .reverse, at: position, matching: predicate)
+            let stamp = makeEntryStamp()
+            var lines: [String] = []
+            // OSLogEnumerator 的文档用法是 Sequence for-in；反向顺序走到窗口起点即停。
+            for entry in enumerator {
+                if entry.date < windowStart { break }
+                guard lines.count < maxEntries else { break }
+                lines.append(formatUnifiedLine(entry, stamp: stamp))
+            }
+            lines.reversed().forEach { record("\(tag)｜\($0)") }
+            return lines.count
+        } catch {
+            record("\(tag)｜OSLogStore 读取失败：\(error.localizedDescription)")
+            return 0
+        }
+    }
+
+    /// 近似 log stream：每 2 秒做一次小窗口反向扫描，窗口内条数有限，永远不阻塞在
+    /// 等待新条目上。每 10 秒记录一次轮询心跳，证明通道活着。
+    private func pollUnifiedLog(store: OSLogStore, predicate: NSPredicate, seconds: Int,
+                                tag: String, record: (String) -> Void) {
+        let start = Date()
+        var cursor = start
+        var polls = 0
+        while Date().timeIntervalSince(start) < TimeInterval(seconds) {
+            Thread.sleep(forTimeInterval: 2)
+            let now = Date()
+            let window = max(1.0, now.timeIntervalSince(cursor))
+            let count = sweepUnifiedLog(store: store, predicate: predicate, since: window,
+                                        maxEntries: 150, tag: tag, record: record)
+            cursor = now
+            polls += 1
+            if polls % 5 == 0 {
+                record("\(tag)｜轮询心跳：已运行 \(Int(now.timeIntervalSince(start))) 秒，最近窗口 \(count) 条")
+            }
+        }
+    }
+
+    private static let carPlayPredicate = NSPredicate(
+        format: "process CONTAINS[c] %@ OR process CONTAINS[c] %@ OR eventMessage CONTAINS[c] %@ OR subsystem CONTAINS[c] %@",
+        "carplay", "accessor", "CarPlay", "carplay")
+
+    private static let buttonPredicate = NSPredicate(
+        format: "eventMessage CONTAINS[c] %@ OR eventMessage CONTAINS[c] %@ OR eventMessage CONTAINS[c] %@ OR eventMessage CONTAINS[c] %@ OR eventMessage CONTAINS[c] %@ OR eventMessage CONTAINS[c] %@ OR eventMessage CONTAINS[c] %@ OR eventMessage CONTAINS[c] %@ OR eventMessage CONTAINS[c] %@ OR eventMessage CONTAINS[c] %@ OR eventMessage CONTAINS[c] %@ OR subsystem CONTAINS[c] %@ OR process CONTAINS[c] %@",
+        "IOHID", "HIDEvent", "hidReport", "keyboard", "button", "knob", "steering", "wheel",
+        "mediaRemote", "iAP2", "accessory", "HID", "carplay")
+
     // MARK: 统一日志（已发生的）
 
     private func scanUnifiedLog() {
+        if let store = openUnifiedLogStore() {
+            sweepUnifiedLog(store: store, predicate: Self.carPlayPredicate, since: 300,
+                            maxEntries: 120, tag: "系统日志(OSLogStore)") { AppLog.record($0) }
+        } else {
+            AppLog.record("系统日志 · OSLogStore 不可用，只剩命令行通道")
+        }
         let predicate = #"process CONTAINS[c] "carplay" OR senderImagePath CONTAINS[c] "CarPlay" OR subsystem CONTAINS[c] "carplay""#
         run(command: "log show --last 5m --style compact --predicate '\(predicate)' 2>&1 | head -c 150000",
-            maxSeconds: 20, maxLines: 120, tag: "系统日志")
+            maxSeconds: 20, maxLines: 120, tag: "系统日志(命令行)")
     }
+
+    // MARK: 按键日志（投屏成功后按键取证）
+
+    /// 车机物理按键若被 iOS 看到，会先经过 HID / BackBoard 再到 carplayd。
+    /// 这里把统一日志里的按键相关行（HID、键盘、旋钮、方向盘、iAP2 配件）单独收集成
+    /// 按键日志文件，并附上 App 自己发出的 HID 报告作为格式参照，便于分析按键如何回传。
+    func collectButtonLogs(seconds: Int) {
+        captureQueue.async { [self] in
+            ButtonLog.shared.startSession()
+            ButtonLog.shared.record("开始收集 · 约 \(seconds) 秒 · 请在收集期间按下车上的按键")
+            if let store = openUnifiedLogStore() {
+                ButtonLog.shared.record("按键日志通道 · OSLogStore（system 域）")
+                sweepUnifiedLog(store: store, predicate: Self.buttonPredicate, since: 180,
+                                maxEntries: 300, tag: "最近 3 分钟") { ButtonLog.record($0) }
+                pollUnifiedLog(store: store, predicate: Self.buttonPredicate, seconds: seconds,
+                               tag: "实时") { ButtonLog.record($0) }
+            } else {
+                ButtonLog.shared.record("按键日志通道 · OSLogStore 不可用，退回命令行（本机已证实 ENOENT）")
+            }
+            run(command: "log show --last 3m --style compact --predicate '\(Self.buttonShellPredicate)' 2>&1 | head -c 200000",
+                maxSeconds: 25, maxLines: 300, tag: "最近 3 分钟(命令行)", scope: "按键日志", record: ButtonLog.record)
+            ButtonLog.shared.record("收集结束")
+        }
+    }
+
+    /// 仅供命令行通道使用的谓词字符串（与 buttonPredicate 同一筛选口径）。
+    private static let buttonShellPredicate = #"(eventMessage CONTAINS[c] "IOHID" OR eventMessage CONTAINS[c] "HIDEvent" OR eventMessage CONTAINS[c] "hidReport" OR eventMessage CONTAINS[c] "keyboard" OR eventMessage CONTAINS[c] "button" OR eventMessage CONTAINS[c] "knob" OR eventMessage CONTAINS[c] "steering" OR eventMessage CONTAINS[c] "wheel" OR eventMessage CONTAINS[c] "mediaRemote" OR eventMessage CONTAINS[c] "iAP2" OR eventMessage CONTAINS[c] "accessory" OR subsystem CONTAINS[c] "HID" OR process CONTAINS[c] "carplay")"#
 
     // MARK: 实时日志流 / 网络抓包（投屏窗口内调用）
 
     /// 在投屏尝试期间实时记录 CarPlay 相关系统日志：daemon 的拒绝/崩溃会当场出现，
-    /// 不用等它写进归档。命令自带 sleep+kill，读循环结束后进程一定退出。
+    /// 不用等它写进归档。OSLogStore 轮询通道优先；命令行通道作为对照保留。
     func streamLogs(seconds: Int) {
         captureQueue.async { [self] in
             AppLog.record("实时系统日志开始 · 约 \(seconds) 秒 · CarPlay 相关")
+            if let store = openUnifiedLogStore() {
+                sweepUnifiedLog(store: store, predicate: Self.carPlayPredicate, since: 60,
+                                maxEntries: 200, tag: "实时系统日志(OSLogStore)") { AppLog.record($0) }
+                pollUnifiedLog(store: store, predicate: Self.carPlayPredicate, seconds: seconds,
+                               tag: "实时系统日志(OSLogStore)") { AppLog.record($0) }
+            } else {
+                AppLog.record("实时系统日志 · OSLogStore 不可用，退回命令行通道")
+            }
             let predicate = #"process CONTAINS[c] "carplay" OR subsystem CONTAINS[c] "carplay" OR eventMessage CONTAINS[c] "CarPlay""#
             run(command: "log stream --style compact --predicate '\(predicate)' 2>&1 & TS=$!; sleep \(seconds); kill -TERM $TS 2>/dev/null",
-                maxSeconds: Double(seconds) + 6, maxLines: 200, tag: "实时系统日志")
+                maxSeconds: Double(seconds) + 6, maxLines: 200, tag: "实时系统日志(命令行)")
         }
     }
 
@@ -300,6 +440,80 @@ final class SystemDiagnostics: @unchecked Sendable {
             AppLog.record("carplayd 启动实验 · launchctl kickstart system/com.apple.carplayd")
             run(command: "launchctl kickstart system/com.apple.carplayd 2>&1; echo 退出码=$?",
                 maxSeconds: 6, maxLines: 20, tag: "carplayd 启动实验")
+        }
+    }
+
+    // MARK: XPC 直探（不依赖任何外部进程的守护进程证据通道）
+
+    /// dlsym 动态解析 bootstrap_look_up/bootstrap_port，避免链接期依赖；TrollStore 平台
+    /// 签名 + no-sandbox 下，launchd 命名空间里能查到什么、被拒绝到什么程度都是证据。
+    private func bootstrapLookupResult(_ service: String) -> (kernReturn: Int32, port: UInt32)? {
+        typealias Lookup = @convention(c) (UInt32, UnsafePointer<CChar>, UnsafeMutablePointer<UInt32>) -> Int32
+        guard let lookupSymbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "bootstrap_look_up") else { return nil }
+        guard let portSymbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "bootstrap_port") else { return nil }
+        let lookup = unsafeBitCast(lookupSymbol, to: Lookup.self)
+        let bootstrapPort = portSymbol.assumingMemoryBound(to: UInt32.self).pointee
+        var port: UInt32 = 0
+        let result = service.withCString { pointer in
+            lookup(bootstrapPort, pointer, &port)
+        }
+        return (result, port)
+    }
+
+    private final class XPCProbeState {
+        var reported = false
+    }
+
+    private func probeXPCConnection(_ name: String) {
+        let state = XPCProbeState()
+        let semaphore = DispatchSemaphore(value: 0)
+        let connection = NSXPCConnection(machServiceName: name, options: [])
+        let started = Date()
+        connection.invalidationHandler = {
+            let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+            if state.reported { return }
+            state.reported = true
+            AppLog.record("XPC 探测 · \(name) · 连接 \(elapsed) 毫秒后失效（服务拒绝或 App 无权限）")
+            semaphore.signal()
+        }
+        connection.resume()
+        if semaphore.wait(timeout: .now() + 2.5) == .timedOut, !state.reported {
+            state.reported = true
+            AppLog.record("XPC 探测 · \(name) · 2.5 秒未失效（连接存活：服务接受了 App，只是没有协议交互）")
+        }
+        connection.invalidate()
+    }
+
+    /// 逐个查找候选 Mach 服务名：命中（kern_return 0）就再做一次 NSXPCConnection 握手；
+    /// 没命中时错误码本身说明该服务是否对 App 的命名空间可见。
+    func probeCarPlayXPC() {
+        captureQueue.async { [self] in
+            let candidates = [
+                "com.apple.carplayd",
+                "com.apple.carplayd.app.service",
+                "com.apple.carplayd.control",
+                "com.apple.carplayd.control.service",
+                "com.apple.carplayd.service",
+                "com.apple.CarPlayServer",
+                "com.apple.accessoryd",
+                "com.apple.coreaccessoriesd",
+                "com.apple.CoreAccessories.server",
+                "com.apple.iapd",
+            ]
+            AppLog.record("XPC 探测开始 · bootstrap 查找 \(candidates.count) 个候选 Mach 服务名")
+            for name in candidates {
+                guard let (result, port) = bootstrapLookupResult(name) else {
+                    AppLog.record("XPC 探测 · \(name)：bootstrap_look_up 符号解析失败")
+                    continue
+                }
+                if result == 0 {
+                    AppLog.record("XPC 探测 · \(name)：bootstrap 命中（端口 \(port)），做 NSXPCConnection 握手")
+                    probeXPCConnection(name)
+                } else {
+                    AppLog.record("XPC 探测 · \(name)：bootstrap 错误码 \(result)（服务不在 App 可见的命名空间）")
+                }
+            }
+            AppLog.record("XPC 探测结束")
         }
     }
 

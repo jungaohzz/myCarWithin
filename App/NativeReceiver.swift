@@ -81,7 +81,9 @@ final class NativeReceiver {
     private var discoveryService: NetService?
     var onLog: ((String) -> Void)?
     var onListening: ((UInt16) -> Void)?
-    var onControlConnected: (() -> Void)?
+    /// Fires once the peer has actually negotiated RTSP (carplayd sends OPTIONS/SETUP),
+    /// unlike bare TCP connects from the loopback self-test which close without any bytes.
+    var onSessionEstablished: (() -> Void)?
     var onVideo: ((Data, VideoCodec) -> Void)?
     var onAirPlayReady: ((UUID) -> Void)?
     var onVideoOutputState: ((String) -> Void)?
@@ -250,7 +252,6 @@ final class NativeReceiver {
                     case .ready:
                         ready = true
                         self.log("收到控制连接 · \(state.peerAddress)")
-                        DispatchQueue.main.async { [weak self] in self?.onControlConnected?() }
                         self.receive(connection, id: id, state: state, configuration: configuration, identity: identity)
                     case .failed(let error):
                         if ready { self.log("控制连接失败：\(error.localizedDescription)（\(state.peerAddress)）") }
@@ -450,6 +451,7 @@ final class NativeReceiver {
             }
             if state.media == nil {
                 log("处理 SETUP 请求 [\(request.body.count) 字节] ← \(state.peerAddress)")
+                DispatchQueue.main.async { [weak self] in self?.onSessionEstablished?() }
                 let media = CarPlayMediaSession(queue: queue, secret: secret, peerAddress: state.peerAddress,
                                                 audioEnabled: configuration.audioEnabled, hevc: configuration.videoCodec == .h265)
                 media.onLog = { [weak self] in self?.log($0) }

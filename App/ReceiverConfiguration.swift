@@ -94,6 +94,35 @@ struct ReceiverConfiguration {
         localIPv4Addresses(interface: "en0").first
     }
 
+    /// en0 的链路层地址。iOS 可能因隐私策略对 App 返回 02:00:00:00:00:00——返回什么
+    /// 都写进日志，用来比对 0x4300 里系统生成的标识是否就是本机 MAC。
+    /// AF_LINK 的 sockaddr_dl 布局按原始字节解析（len, family, index×2, type, nlen, alen,
+    /// slen, name…），避免直接依赖 sockaddr_dl 的 Swift 可见性。
+    static func wifiMACAddress() -> String? {
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0 else { return nil }
+        defer { freeifaddrs(first) }
+        var current = first
+        while let entry = current {
+            defer { current = entry.pointee.ifa_next }
+            guard let address = entry.pointee.ifa_addr,
+                  String(cString: entry.pointee.ifa_name) == "en0",
+                  address.pointee.sa_family == UInt8(AF_LINK) else { continue }
+            let length = Int(address.pointee.sa_len)
+            guard length >= 14 else { continue }
+            var mac: [UInt8] = []
+            address.withMemoryRebound(to: UInt8.self, capacity: length) { pointer in
+                let nameLength = Int(pointer[5])
+                let addressLength = Int(pointer[6])
+                guard addressLength == 6, 8 + nameLength + 6 <= length else { return }
+                mac = (0..<6).map { pointer[8 + nameLength + $0] }
+            }
+            guard mac.count == 6 else { continue }
+            return mac.map { String(format: "%02x", $0) }.joined(separator: ":")
+        }
+        return nil
+    }
+
     static func localIPv4Addresses(interface: String? = nil) -> [String] {
         var first: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&first) == 0 else { return [] }
