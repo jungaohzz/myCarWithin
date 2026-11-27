@@ -3185,7 +3185,7 @@ extension ReceiverViewController {
     }
 
     private func experimentSections() -> [SettingsSection] {
-        var sections = [SettingsSection("iOS 15 本机 CarPlay 实验", footer: "iAP2 握手与 0x4301 在 iOS 15.6 已全部成功，但系统 CarPlay 守护进程从不回连。这些开关逐项改变配件声明与 0x4301 的组合，用来定位守护进程的判定条件；修改后下一次启动本机 CarPlay 才生效，日志会记录实际组合。传输类型 3 对应 0x4300 里声明的值，8 为旧实验，失败都会自动回退 2。0x4301 标识回填：参数 3 改用 0x4300 里系统生成的标识（优先 MAC 样式）。ACC 自证：iAP2 认证通过后尝试把 CoreAccessories 的连接级认证标志置为已认证。每次本机 CarPlay 启动还会：安装 ACC 委托探针并快照连接状态/属性/签名、尝试 kickstart carplayd、自测回连端口、抓包 70 秒、OSLogStore 与命令行双通道记录系统日志 60 秒、XPC 探测候选守护进程、12 秒后扫描崩溃报告/偏好/launchctl/进程表/carplayd 二进制。读取失败同样写入日志。", [
+        var sections = [SettingsSection("iOS 15 本机 CarPlay 实验", footer: "iAP2 握手与 0x4301 在 iOS 15.6 已全部成功，但系统 CarPlay 守护进程从不回连。这些开关逐项改变配件声明与 0x4301 的组合，用来定位守护进程的判定条件；修改后下一次启动本机 CarPlay 才生效，日志会记录实际组合。传输类型 3 对应 0x4300 里声明的值，8 为旧实验，失败都会自动回退 2。0x4301 标识回填：参数 3 改用 0x4300 里系统生成的标识（优先 MAC 样式）。ACC 自证：iAP2 认证通过后尝试把 CoreAccessories 的连接级认证标志置为已认证。每次本机 CarPlay 启动还会：安装 ACC 委托探针并快照连接状态/属性/签名、尝试 kickstart carplayd、自测回连端口、抓包 70 秒、OSLogStore（本进程域，iOS 公开 API 读不到系统日志）与命令行双通道记录日志 60 秒、XPC 探测候选守护进程、12 秒后扫描崩溃报告/偏好/launchctl/进程表/carplayd 二进制。读取失败同样写入日志。", [
             .control("本机传输类型", icon: ("cable.connector", .systemIndigo), localTransportControl),
             .control("0x1D01 仅声明 Wi-Fi 传输", icon: ("wifi", .systemBlue), localWifiOnlySwitch),
             .control("0x4301 跳过 Wi-Fi 凭据", icon: ("key.slash", .systemOrange), localSkipWifiSwitch),

@@ -231,22 +231,16 @@ final class SystemDiagnostics: @unchecked Sendable {
     // MARK: 统一日志（OSLogStore API 通道）
 
     /// posix_spawn 在 iOS 15.6 的 TrollStore 环境里拿不到 /bin/sh（ENOENT），命令行日志通道
-    /// 整体失效。OSLogStore 是 iOS 15 的公开 API，进程内直接读统一日志，不经过任何外部
-    /// 进程：system 域若被拒就退回本进程域，两种结果都写进日志作为证据。
+    /// 整体失效。OSLogStore 是 iOS 15 的公开 API，但它只有本进程域——`.system` 作用域在
+    /// iOS 上是编译期不可用（macOS 专属，本次 CI 已实测报错），所以这个通道只能看到本 App
+    /// 自己的日志，看不到 carplayd。日志里写明这一点，避免把空结果误读成“守护进程没动静”。
     private func openUnifiedLogStore() -> OSLogStore? {
         do {
-            let store = try OSLogStore(scope: .system)
-            AppLog.record("OSLogStore · system 域已打开（进程内读统一日志，不依赖命令行工具）")
-            return store
-        } catch {
-            AppLog.record("OSLogStore · system 域打开失败：\(error.localizedDescription)")
-        }
-        do {
             let store = try OSLogStore(scope: .currentProcessIdentifier)
-            AppLog.record("OSLogStore · 退回本进程域（只能看到本进程，看不到 carplayd）")
+            AppLog.record("OSLogStore · 本进程域已打开。边界：`.system` 域在 iOS 上编译期不可用，公开 API 读不到 carplayd 的日志，通道内只有本 App 自己的行")
             return store
         } catch {
-            AppLog.record("OSLogStore · 本进程域也打开失败：\(error.localizedDescription)（统一日志 API 通道不可用）")
+            AppLog.record("OSLogStore · 本进程域打开失败：\(error.localizedDescription)（统一日志 API 通道不可用）")
             return nil
         }
     }
@@ -346,19 +340,19 @@ final class SystemDiagnostics: @unchecked Sendable {
     func collectButtonLogs(seconds: Int) {
         captureQueue.async { [self] in
             ButtonLog.shared.startSession()
-            ButtonLog.shared.record("开始收集 · 约 \(seconds) 秒 · 请在收集期间按下车上的按键")
+            ButtonLog.record("开始收集 · 约 \(seconds) 秒 · 请在收集期间按下车上的按键")
             if let store = openUnifiedLogStore() {
-                ButtonLog.shared.record("按键日志通道 · OSLogStore（system 域）")
+                ButtonLog.record("按键日志通道 · OSLogStore（本进程域；系统域在 iOS 上不可用，车机按键若走 carplayd 这里看不到）")
                 sweepUnifiedLog(store: store, predicate: Self.buttonPredicate, since: 180,
                                 maxEntries: 300, tag: "最近 3 分钟") { ButtonLog.record($0) }
                 pollUnifiedLog(store: store, predicate: Self.buttonPredicate, seconds: seconds,
                                tag: "实时") { ButtonLog.record($0) }
             } else {
-                ButtonLog.shared.record("按键日志通道 · OSLogStore 不可用，退回命令行（本机已证实 ENOENT）")
+                ButtonLog.record("按键日志通道 · OSLogStore 不可用，退回命令行（本机已证实 ENOENT）")
             }
             run(command: "log show --last 3m --style compact --predicate '\(Self.buttonShellPredicate)' 2>&1 | head -c 200000",
                 maxSeconds: 25, maxLines: 300, tag: "最近 3 分钟(命令行)", scope: "按键日志", record: ButtonLog.record)
-            ButtonLog.shared.record("收集结束")
+            ButtonLog.record("收集结束")
         }
     }
 
@@ -460,32 +454,10 @@ final class SystemDiagnostics: @unchecked Sendable {
         return (result, port)
     }
 
-    private final class XPCProbeState {
-        var reported = false
-    }
-
-    private func probeXPCConnection(_ name: String) {
-        let state = XPCProbeState()
-        let semaphore = DispatchSemaphore(value: 0)
-        let connection = NSXPCConnection(machServiceName: name, options: [])
-        let started = Date()
-        connection.invalidationHandler = {
-            let elapsed = Int(Date().timeIntervalSince(started) * 1000)
-            if state.reported { return }
-            state.reported = true
-            AppLog.record("XPC 探测 · \(name) · 连接 \(elapsed) 毫秒后失效（服务拒绝或 App 无权限）")
-            semaphore.signal()
-        }
-        connection.resume()
-        if semaphore.wait(timeout: .now() + 2.5) == .timedOut, !state.reported {
-            state.reported = true
-            AppLog.record("XPC 探测 · \(name) · 2.5 秒未失效（连接存活：服务接受了 App，只是没有协议交互）")
-        }
-        connection.invalidate()
-    }
-
-    /// 逐个查找候选 Mach 服务名：命中（kern_return 0）就再做一次 NSXPCConnection 握手；
-    /// 没命中时错误码本身说明该服务是否对 App 的命名空间可见。
+    /// 逐个查找候选 Mach 服务名。NSXPCConnection 的 machServiceName 初始化在 iOS 上
+    /// 编译期不可用（macOS 专属），能做的握手就是 bootstrap_look_up：kern_return 0
+    /// 表示服务在 launchd 里注册且本 App 的命名空间可见，错误码则表示不可见。这就是
+    /// 本实验的证据终点，不再有“连接存活”这一步。
     func probeCarPlayXPC() {
         captureQueue.async { [self] in
             let candidates = [
@@ -500,15 +472,14 @@ final class SystemDiagnostics: @unchecked Sendable {
                 "com.apple.CoreAccessories.server",
                 "com.apple.iapd",
             ]
-            AppLog.record("XPC 探测开始 · bootstrap 查找 \(candidates.count) 个候选 Mach 服务名")
+            AppLog.record("XPC 探测开始 · bootstrap 查找 \(candidates.count) 个候选 Mach 服务名（iOS 上 NSXPC 只支持 listener 端点，服务名查找结果就是证据终点）")
             for name in candidates {
                 guard let (result, port) = bootstrapLookupResult(name) else {
                     AppLog.record("XPC 探测 · \(name)：bootstrap_look_up 符号解析失败")
                     continue
                 }
                 if result == 0 {
-                    AppLog.record("XPC 探测 · \(name)：bootstrap 命中（端口 \(port)），做 NSXPCConnection 握手")
-                    probeXPCConnection(name)
+                    AppLog.record("XPC 探测 · \(name)：bootstrap 命中（端口 \(port)）——服务已注册且对本 App 可见")
                 } else {
                     AppLog.record("XPC 探测 · \(name)：bootstrap 错误码 \(result)（服务不在 App 可见的命名空间）")
                 }
