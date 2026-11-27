@@ -223,12 +223,18 @@ final class TailingOutputSession: @unchecked Sendable {
         onKeyframeRequest?()
     }
 
+    /// CVPixelBuffer 不是 Sendable；encoding 闸门保证同一时刻只有一个编码任务，且只读。
+    private struct PixelBufferBox: @unchecked Sendable {
+        let buffer: CVPixelBuffer
+    }
+
     private func encode(_ buffer: CVPixelBuffer) {
         condition.lock()
         let now = ProcessInfo.processInfo.systemUptime
         guard !closed, !failed, !encoding, now - lastEncode >= 1.0 / 20 else { condition.unlock(); return }
         encoding = true; lastEncode = now
         condition.unlock()
+        let boxed = PixelBufferBox(buffer: buffer)
         jpegQueue.async { [self] in
             #if DEBUG
             let startedAt = ProcessInfo.processInfo.systemUptime
@@ -241,7 +247,7 @@ final class TailingOutputSession: @unchecked Sendable {
             }
             guard isActive else { return }
             autoreleasepool {
-                let source = CIImage(cvPixelBuffer: buffer)
+                let source = CIImage(cvPixelBuffer: boxed.buffer)
                 let bounds = CGRect(x: 0, y: 0, width: 480, height: 272)
                 let scale = min(bounds.width / source.extent.width, bounds.height / source.extent.height)
                 let scaled = source.transformed(by: CGAffineTransform(scaleX: scale, y: scale))

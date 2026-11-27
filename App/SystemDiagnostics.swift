@@ -35,38 +35,82 @@ final class SystemDiagnostics: @unchecked Sendable {
         }
     }
 
-    // MARK: 通用 popen 读取（非阻塞，带时限）
+    // MARK: 通用命令读取（非阻塞，带时限）
 
-    /// Foundation.Process 不存在于 iOS SDK，只能 popen 走 /bin/sh。读取设成非阻塞，
-    /// 这样即使被探测的命令不输出，也不会卡死扫描队列。
+    /// iOS SDK 对 Swift 屏蔽了 Foundation.Process 和 popen/pclose，posix_spawn 是拉起
+    /// /bin/sh 的唯一通道。读取设成非阻塞，这样即使被探测的命令不输出，
+    /// 也不会卡死扫描队列。waitpid 阻塞回收与 pclose 语义一致：命令自带退出机制。
     private func run(command: String, maxSeconds: TimeInterval, maxLines: Int, tag: String) {
-        guard let pipe = popen(command, "r") else {
-            AppLog.record("系统诊断 · \(tag)：popen 失败（errno \(errno)，进程启动被拒绝）")
+        var fds = [Int32](repeating: 0, count: 2)
+        guard pipe(&fds) == 0 else {
+            AppLog.record("系统诊断 · \(tag)：pipe 失败（errno \(errno)）")
             return
         }
-        let fd = fileno(pipe)
-        let flags = fcntl(fd, F_GETFL)
-        if flags >= 0 { _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK) }
-        var buffer = [CChar](repeating: 0, count: 4096)
+        let readFd = fds[0]
+        let writeFd = fds[1]
+
+        var fileActions = posix_spawn_file_actions_t()
+        posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_addclose(&fileActions, readFd)
+        posix_spawn_file_actions_adddup2(&fileActions, writeFd, STDOUT_FILENO)
+        posix_spawn_file_actions_adddup2(&fileActions, writeFd, STDERR_FILENO)
+        posix_spawn_file_actions_addclose(&fileActions, writeFd)
+
+        guard let shPath = strdup("/bin/sh"), let dashC = strdup("-c"), let commandC = strdup(command) else {
+            posix_spawn_file_actions_destroy(&fileActions)
+            close(readFd)
+            close(writeFd)
+            AppLog.record("系统诊断 · \(tag)：spawn 参数复制失败（内存不足）")
+            return
+        }
+        defer { free(shPath); free(dashC); free(commandC) }
+        var argv: [UnsafeMutablePointer<CChar>?] = [shPath, dashC, commandC, nil]
+
+        var pid: pid_t = 0
+        let spawnResult = posix_spawn(&pid, shPath, &fileActions, nil, &argv, nil)
+        posix_spawn_file_actions_destroy(&fileActions)
+        close(writeFd)
+        guard spawnResult == 0 else {
+            close(readFd)
+            AppLog.record("系统诊断 · \(tag)：posix_spawn 失败（错误码 \(spawnResult)，进程启动被拒绝）")
+            return
+        }
+
+        let flags = fcntl(readFd, F_GETFL)
+        if flags >= 0 { _ = fcntl(readFd, F_SETFL, flags | O_NONBLOCK) }
+        var pending: [UInt8] = []
         var lines = 0
         var totalBytes = 0
         let deadline = Date().addingTimeInterval(maxSeconds)
         while Date() < deadline {
-            if fgets(&buffer, Int32(buffer.count), pipe) != nil {
-                let text = String(cString: buffer).trimmingCharacters(in: .newlines)
+            var chunk = [UInt8](repeating: 0, count: 4096)
+            let count = read(readFd, &chunk, chunk.count)
+            if count > 0 {
+                pending.append(contentsOf: chunk[0..<count])
+            } else if count == 0 {
+                if pending.isEmpty { break }
+                pending.append(0x0A) // fgets 会补出无换行的末行，EOF 时同样冲刷
+            } else if errno == EAGAIN || errno == EINTR {
+                usleep(100_000)
+            } else {
+                break
+            }
+            while let newline = pending.firstIndex(of: 0x0A) {
+                let text = String(decoding: pending[0..<newline], as: UTF8.self)
+                    .trimmingCharacters(in: .newlines)
+                pending.removeSubrange(0...newline)
                 guard !text.isEmpty else { continue }
                 totalBytes += text.utf8.count
                 if lines < maxLines {
                     AppLog.record("\(tag)｜\(text.prefix(300))")
                     lines += 1
                 }
-            } else if feof(pipe) != 0 {
-                break
-            } else {
-                usleep(100_000)
             }
+            if count == 0 { break }
         }
-        _ = pclose(pipe)
+        close(readFd)
+        var status: Int32 = 0
+        _ = waitpid(pid, &status, 0)
         AppLog.record("系统诊断 · \(tag) 结束：输出 \(lines) 行 / \(totalBytes) 字节")
     }
 
@@ -221,7 +265,7 @@ final class SystemDiagnostics: @unchecked Sendable {
     /// 证明 RTSP 端口在本机可回连；这样如果抓包也看不到 carplayd 的包，
     /// 就能确定是守护进程没尝试，而不是我们的监听器有问题。
     func selfConnectTest(port: UInt16) {
-        captureQueue.async { [self] in
+        captureQueue.async {
             let fd = socket(AF_INET, SOCK_STREAM, 0)
             guard fd >= 0 else {
                 AppLog.record("回连自测 · socket 创建失败（errno \(errno)）")
