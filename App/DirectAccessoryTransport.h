@@ -21,5 +21,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSString *)authSummary;
 /// Experiment: signature-guarded attempt to flip the connection-level authenticated flag.
 - (void)attemptSelfAuthentication;
+/// Experiment: write one endpoint property, e.g. iAP2_Initialized. Logs the result and
+/// the property table before/after so a rejected write is still evidence.
+- (BOOL)setEndpointProperty:(NSString *)key value:(id)value;
+/// Experiment: same for a connection-level property.
+- (BOOL)setConnectionProperty:(NSString *)key value:(id)value;
 @end
 NS_ASSUME_NONNULL_END

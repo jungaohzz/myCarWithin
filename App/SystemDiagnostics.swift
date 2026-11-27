@@ -27,6 +27,7 @@ final class SystemDiagnostics: @unchecked Sendable {
             lastScan = now
             AppLog.record("系统诊断扫描开始 · \(reason)")
             scanPaths()
+            scanCarPlayComponents()
             scanLogDirectories()
             scanPreferences()
             scanDaemons()
@@ -121,11 +122,112 @@ final class SystemDiagnostics: @unchecked Sendable {
     // MARK: 路径与崩溃报告
 
     private func scanPaths() {
-        let paths = ["/usr/libexec/carplayd", "/usr/bin/log", "/bin/launchctl", "/usr/bin/ps",
+        let paths = ["/usr/libexec/carplayd", "/usr/sbin/carplayd", "/usr/libexec/carkitd",
+                     "/usr/libexec/airplayd", "/usr/sbin/airplayd", "/usr/libexec/iapd",
+                     "/usr/libexec/accessoryd", "/usr/libexec/backboardd",
+                     "/usr/bin/log", "/bin/launchctl", "/usr/bin/ps",
                      "/usr/sbin/tcpdump", "/usr/bin/strings", "/usr/bin/grep", "/bin/sh",
+                     "/System/Library/PrivateFrameworks/CarPlay.framework/CarPlay",
+                     "/System/Library/PrivateFrameworks/CarPlayServices.framework/CarPlayServices",
+                     "/System/Library/PrivateFrameworks/CarPlayUIServices.framework/CarPlayUIServices",
+                     "/System/Library/PrivateFrameworks/CarKit.framework/CarKit",
+                     "/System/Library/PrivateFrameworks/CarAccessoryFramework.framework/CarAccessoryFramework",
+                     "/System/Library/LaunchDaemons/com.apple.carplayd.plist",
+                     "/System/Library/LaunchDaemons/com.apple.carkitd.plist",
                      "/var/mobile/Library/Logs/DiagnosticReports", "/var/mobile/Library/Logs/CrashReporter"]
-        let present = paths.map { "\($0)=\(FileManager.default.fileExists(atPath: $0) ? "有" : "无")" }
+        let present = paths.map { path -> String in
+            guard FileManager.default.fileExists(atPath: path) else { return "\(path)=无" }
+            let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int
+            return "\(path)=有(\(size.map { "\($0)B" } ?? "大小?"))"
+        }
         AppLog.record("系统诊断 · 关键路径：\(present.joined(separator: "，"))")
+    }
+
+    // MARK: 系统里装了哪些 CarPlay 组件
+
+    /// iOS 15.6 到底有没有等价进程：列出 launchd 任务清单和 CarPlay 相关框架，
+    /// 再从候选二进制里搜 “4301 / StartSession / CarPlay” 字符串——谁实现了
+    /// 0x4301 的消费逻辑，字符串就出现在谁里面。
+    private func scanCarPlayComponents() {
+        let daemons = ["/System/Library/LaunchDaemons", "/System/Library/LaunchAgents"]
+        for directory in daemons {
+            let items = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+            let matched = items.filter { name in
+                let lower = name.lowercased()
+                return lower.contains("carplay") || lower.contains("carkit") || lower.contains("airplay")
+                    || lower.contains("accessory") || lower.contains("iap")
+            }.sorted()
+            AppLog.record("系统诊断 · \(directory) 共 \(items.count) 项，CarPlay/配件相关 \(matched.count) 项：\(matched.prefix(30).joined(separator: "，"))")
+            for name in matched.prefix(10) {
+                let path = directory + "/" + name
+                guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                      let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any]
+                else {
+                    AppLog.record("系统诊断 · 任务 \(name) 不可解析")
+                    continue
+                }
+                let services = (plist["MachServices"] as? [String: Any])?.keys.sorted() ?? []
+                let program = (plist["Program"] as? String) ?? (plist["BundleProgram"] as? String) ?? "?"
+                let runAtLoad = plist["RunAtLoad"] as? Bool ?? false
+                AppLog.record("系统诊断 · 任务 \(name)：程序 \(program)，RunAtLoad=\(runAtLoad)，MachServices=\(services.joined(separator: "，" ) )")
+                // launchctl disable 状态写在 /var/db/com.apple.xpc.launchd/disabled.*.plist。
+                let disabledPath = "/var/db/com.apple.xpc.launchd/disabled.501.plist"
+                if let disabled = try? Data(contentsOf: URL(fileURLWithPath: disabledPath)),
+                   let dictionary = try? PropertyListSerialization.propertyList(from: disabled, options: [], format: nil) as? [String: Any] {
+                    let label = name.replacingOccurrences(of: ".plist", with: "")
+                    if let state = dictionary[label] { AppLog.record("系统诊断 · 禁用状态 \(label) = \(state)") }
+                }
+            }
+        }
+        let frameworks = (try? FileManager.default.contentsOfDirectory(atPath: "/System/Library/PrivateFrameworks")) ?? []
+        let carFrameworks = frameworks.filter { $0.lowercased().contains("car") }.sorted()
+        AppLog.record("系统诊断 · PrivateFrameworks 共 \(frameworks.count) 项，名字含 Car 的 \(carFrameworks.count) 项：\(carFrameworks.prefix(40).joined(separator: "，"))")
+        scanBinarySignatures()
+    }
+
+    /// 在候选二进制里找协议字符串：命中 “4301” 等说明该进程实现了 CarPlay 会话启动。
+    private func scanBinarySignatures() {
+        let binaries = ["/usr/libexec/iapd", "/usr/libexec/backboardd",
+                        "/System/Library/PrivateFrameworks/CarPlay.framework/CarPlay",
+                        "/System/Library/PrivateFrameworks/CarKit.framework/CarKit"]
+        let needles = ["4301", "StartSession", "startSession", "CarPlay", "carplayd"]
+        for path in binaries {
+            guard let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int,
+                  size > 0 else {
+                AppLog.record("系统诊断 · 二进制 \(path) 不存在或为空，跳过字符串搜索")
+                continue
+            }
+            guard size < 80 * 1024 * 1024 else {
+                AppLog.record("系统诊断 · 二进制 \(path) 太大（\(size)B），跳过字符串搜索")
+                continue
+            }
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe) else {
+                AppLog.record("系统诊断 · 二进制 \(path) 读取失败（\(size)B）")
+                continue
+            }
+            for needle in needles {
+                let needleData = Data(needle.utf8)
+                var searchStart = data.startIndex
+                var hits = 0
+                var samples: [String] = []
+                while hits < 200, searchStart < data.endIndex,
+                      let range = data.range(of: needleData, in: searchStart..<data.endIndex) {
+                    hits += 1
+                    if samples.count < 3 {
+                        let lower = max(data.startIndex, range.lowerBound - 24)
+                        let upper = min(data.endIndex, range.upperBound + 24)
+                        let context = data[lower..<upper].map { byte -> UInt8 in
+                            (32...126).contains(byte) ? byte : 46
+                        }
+                        samples.append(String(decoding: context, as: UTF8.self))
+                    }
+                    searchStart = range.upperBound
+                }
+                if hits > 0 {
+                    AppLog.record("系统诊断 · \(path) 含 “\(needle)” \(hits) 次：(命中片段上界 200)\(samples.map { "｜\($0)" }.joined())")
+                }
+            }
+        }
     }
 
     private func scanLogDirectories() {
@@ -194,6 +296,11 @@ final class SystemDiagnostics: @unchecked Sendable {
                 case let number as NSNumber: description = number.stringValue
                 case let string as String: description = String(string.prefix(120))
                 case let date as Date: description = Self.stamp(date)
+                case let data as Data:
+                    let hex = data.prefix(48).map { String(format: "%02x", $0) }.joined()
+                    description = "Data \(data.count)B 开头 \(hex)"
+                case let array as [Any]: description = "数组 \(array.count) 项：\(String(describing: array.prefix(5)))"
+                case let dictionary as [String: Any]: description = "字典 \(dictionary.count) 键：\(dictionary.keys.sorted().prefix(8).joined(separator: "，"))"
                 case .some(let other): description = String(describing: type(of: other))
                 case .none: description = "nil"
                 }
@@ -466,11 +573,19 @@ final class SystemDiagnostics: @unchecked Sendable {
                 "com.apple.carplayd.control",
                 "com.apple.carplayd.control.service",
                 "com.apple.carplayd.service",
+                "com.apple.carplayd.agent",
                 "com.apple.CarPlayServer",
+                "com.apple.CarPlay",
+                "com.apple.carkitd",
+                "com.apple.CarKit",
+                "com.apple.airplayd",
+                "com.apple.airplayd.service",
                 "com.apple.accessoryd",
                 "com.apple.coreaccessoriesd",
                 "com.apple.CoreAccessories.server",
                 "com.apple.iapd",
+                "com.apple.iap2d",
+                "com.apple.wifid",
             ]
             AppLog.record("XPC 探测开始 · bootstrap 查找 \(candidates.count) 个候选 Mach 服务名（iOS 上 NSXPC 只支持 listener 端点，服务名查找结果就是证据终点）")
             for name in candidates {

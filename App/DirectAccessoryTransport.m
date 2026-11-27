@@ -110,7 +110,7 @@ static Class ACCClientClass(void) {
 }
 - (BOOL)startWithIdentifier:(NSString *)identifier transportType:(NSUInteger)transportType error:(NSError **)error {
     [self stop];
-    if (transportType != 2 && transportType != 3 && transportType != 8) return Failed(error, @"不支持的本机传输类型。");
+    if (transportType != 1 && transportType != 2 && transportType != 3 && transportType != 8) return Failed(error, @"不支持的本机传输类型。");
 #if TARGET_OS_MACCATALYST || TARGET_OS_SIMULATOR
     return Failed(error, @"This transport test requires a physical iPhone; Catalyst and Simulator are not supported.");
 #else
@@ -336,6 +336,40 @@ static Class ACCClientClass(void) {
     } @catch (NSException *exception) {
         [self reportDiag:[NSString stringWithFormat:@"ACC 自证 · 调用异常 %@，随后状态：%@", exception.name, [self authSummary]]];
     }
+}
+- (BOOL)writeProperty:(NSString *)key value:(id)value endpointLevel:(BOOL)endpointLevel {
+    NSString *level = endpointLevel ? @"端点" : @"连接";
+    if (!self.client) { [self reportDiag:[NSString stringWithFormat:@"ACC 写属性 · %@：客户端不存在", level]]; return NO; }
+    if (key.length == 0) { [self reportDiag:[NSString stringWithFormat:@"ACC 写属性 · %@：键为空", level]]; return NO; }
+    id target = endpointLevel ? self.endpoint : self.connection;
+    if (![target isKindOfClass:NSString.class]) {
+        [self reportDiag:[NSString stringWithFormat:@"ACC 写属性 · %@尚未建立（%@ = %@）", level, key, value]];
+        return NO;
+    }
+    NSString *name = endpointLevel ? @"setProperties:forEndpointWithUUID:" : @"setProperties:forConnectionWithUUID:";
+    if (!HasMethod(self.client, name, 2)) {
+        [self reportDiag:[NSString stringWithFormat:@"ACC 写属性 · %@ 不可用", name]];
+        return NO;
+    }
+    NSDictionary *properties = @{key: value ?: NSNull.null};
+    @try {
+        ((void (*)(id, SEL, id, id))objc_msgSend)(self.client, NSSelectorFromString(name), properties, target);
+        [self reportDiag:[NSString stringWithFormat:@"ACC 写属性 · %@ %@ = %@ → 调用完成", level, key, value]];
+        if (endpointLevel)
+            [self dumpObjectMethod:@"propertiesForEndpointWithUUID:" label:@"写后端点属性" argument:self.endpoint];
+        else
+            [self dumpObjectMethod:@"propertiesForConnectionWithUUID:" label:@"写后连接属性" argument:self.connection];
+        return YES;
+    } @catch (NSException *exception) {
+        [self reportDiag:[NSString stringWithFormat:@"ACC 写属性 · %@ 异常 %@", level, exception.name]];
+        return NO;
+    }
+}
+- (BOOL)setEndpointProperty:(NSString *)key value:(id)value {
+    return [self writeProperty:key value:value endpointLevel:YES];
+}
+- (BOOL)setConnectionProperty:(NSString *)key value:(id)value {
+    return [self writeProperty:key value:value endpointLevel:NO];
 }
 - (BOOL)sendData:(NSData *)data error:(NSError **)error {
     if (!self.endpoint || !self.client) return Failed(error, @"Direct transport is not open.");

@@ -35,6 +35,7 @@ final class SameDeviceProbe {
     private var availableTransports: [(type: UInt8, identifier: String)] = []
     private var experimentMatchIdent = false
     private var experimentAccSelfAuth = true
+    private var experimentEndpointInitSelf = true
     var onLog: ((String) -> Void)?
 
     private func hexPreview(_ data: Data, limit: Int = 96) -> String {
@@ -50,17 +51,18 @@ final class SameDeviceProbe {
         startedAt = .now()
         let defaults = UserDefaults.standard
         let rawTransport = defaults.object(forKey: "localTransportType") as? Int ?? 2
-        experimentTransportType = (rawTransport == 8 || rawTransport == 3) ? UInt(rawTransport) : 2
+        experimentTransportType = [1, 3, 8].contains(rawTransport) ? UInt(rawTransport) : 2
         experimentWifiOnly = defaults.bool(forKey: "localWifiOnlyIdent")
         experimentSkipWifi = defaults.bool(forKey: "localSkipWifi")
         experimentLoopback = defaults.bool(forKey: "localLoopbackSession")
         experimentMatchIdent = defaults.bool(forKey: "localMatch4300Ident")
         experimentAccSelfAuth = defaults.object(forKey: "localAccSelfAuth") as? Bool ?? true
+        experimentEndpointInitSelf = defaults.object(forKey: "localEndpointInitSelf") as? Bool ?? true
         effectiveTransportType = experimentTransportType
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let wifi = configuration.ssid.isEmpty ? "Wi-Fi 未填写"
             : "Wi-Fi \(configuration.ssid)/信道 \(configuration.wifiChannel)/\(configuration.password.isEmpty ? "开放网络" : "密码 \(configuration.password.utf8.count) 字节")"
-        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")，0x4301 目标=127.0.0.1=\(experimentLoopback ? "是" : "否")，0x4301 标识回填 0x4300=\(experimentMatchIdent ? "是" : "否")，ACC 自证=\(experimentAccSelfAuth ? "开" : "关")")
+        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")，0x4301 目标=127.0.0.1=\(experimentLoopback ? "是" : "否")，0x4301 标识回填 0x4300=\(experimentMatchIdent ? "是" : "否")，ACC 自证=\(experimentAccSelfAuth ? "开" : "关")，端点 iAP2_Initialized 自填=\(experimentEndpointInitSelf ? "开" : "关")")
         onLog?("本机传输能力（CoreAccessories）：" + String(DirectAccessoryTransport.apiSummary().prefix(1500)))
         // 0x4300 的系统生成标识长得像 en0 MAC（28:02:44:b1:2b:c2）；把本机 MAC 打出来比对。
         // iOS 可能对 App 返回 02:00:00:00:00:00，这本身也是证据。
@@ -266,7 +268,15 @@ final class SameDeviceProbe {
             if experimentAccSelfAuth { transport.attemptSelfAuthentication() }
         case 0x1d00: try send(AccessoryMessages.identification(name: configuration.name, deviceID: configuration.deviceID,
                                                               wifiOnly: experimentWifiOnly))
-        case 0x1d02: identified = true; stage("iOS 已接受配件识别，正在等待 CarPlay 可用通知")
+        case 0x1d02:
+            identified = true; stage("iOS 已接受配件识别，正在等待 CarPlay 可用通知")
+            // 日志里端点属性 iAP2_Initialized 一直是 <null>：补一次显式写入，
+            // 看 CoreAccessories 接受、拒绝还是忽略——三种结果都是证据。
+            if experimentEndpointInitSelf {
+                let accepted = transport.setEndpointProperty("iAP2_Initialized", value: true)
+                onLog?("端点属性自填 · iAP2_Initialized=true 调用\(accepted ? "完成" : "未发出")")
+                transport.dumpConnectionState("端点 iAP2_Initialized 自填后")
+            }
         case 0x1d03:
             let rejected = message.parameters.map { String(format: "%04X:%@", $0.id, $0.value.prefix(32).map { String(format: "%02X", $0) }.joined()) }.joined(separator: ",")
             finish("iOS 拒绝了配件识别（0x1D03）：\(rejected)")
@@ -295,6 +305,14 @@ final class SameDeviceProbe {
                 return
             }
             try requestSession(configuration)
+            if !requested {
+                // 0x4301 被系统受理后属性表是否变化，是“谁消费了启动请求”的直接证据。
+                let run = generation
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    guard let self, self.active, self.generation == run else { return }
+                    self.transport.dumpConnectionState("首个 0x4301 后 5 秒")
+                }
+            }
             if !requested && expectsLocalControl {
                 let run = generation
                 for delay in [3.0, 6.0, 9.0] {
