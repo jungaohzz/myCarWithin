@@ -227,7 +227,7 @@ static Class ACCClientClass(void) {
         NSMutableString *types = [NSMutableString string];
         for (NSUInteger index = 0; index < signature.numberOfArguments; index++) {
             [types appendFormat:@"%@ ",
-                [NSString stringWithUTF8String:[signature methodArgumentTypeAtIndex:index] ?: "?"]];
+                [NSString stringWithUTF8String:[signature getArgumentTypeAtIndex:index] ?: "?"]];
         }
         [self reportDiag:[NSString stringWithFormat:@"ACC 签名 · %@：参数 %lu 个（%@）返回 %@",
             name, (unsigned long)signature.numberOfArguments, types,
@@ -306,7 +306,7 @@ static Class ACCClientClass(void) {
     NSMutableString *plan = [NSMutableString string];
     BOOL filled = YES;
     for (NSUInteger index = 2; index < signature.numberOfArguments; index++) {
-        const char *type = [signature methodArgumentTypeAtIndex:index];
+        const char *type = [signature getArgumentTypeAtIndex:index];
         if (type == NULL) { filled = NO; break; }
         if (type[0] == '@') {
             void *value = (__bridge void *)self.connection;
