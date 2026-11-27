@@ -49,7 +49,8 @@ final class SystemDiagnostics: @unchecked Sendable {
         let readFd = fds[0]
         let writeFd = fds[1]
 
-        var fileActions = posix_spawn_file_actions_t()
+        // Darwin 上 posix_spawn_file_actions_t 是不透明指针 typedef，只能由 init 填充。
+        var fileActions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&fileActions)
         posix_spawn_file_actions_addclose(&fileActions, readFd)
         posix_spawn_file_actions_adddup2(&fileActions, writeFd, STDOUT_FILENO)
@@ -67,7 +68,7 @@ final class SystemDiagnostics: @unchecked Sendable {
         var argv: [UnsafeMutablePointer<CChar>?] = [shPath, dashC, commandC, nil]
 
         var pid: pid_t = 0
-        let spawnResult = posix_spawn(&pid, shPath, &fileActions, nil, &argv, nil)
+        let spawnResult = posix_spawn(&pid, shPath, &fileActions, nil, &argv, environ)
         posix_spawn_file_actions_destroy(&fileActions)
         close(writeFd)
         guard spawnResult == 0 else {
