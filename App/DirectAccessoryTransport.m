@@ -4,6 +4,8 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <xpc/xpc.h>
+#import <libproc.h>
+#import <sys/sysctl.h>
 
 /// Delegate callbacks we explicitly implement. Parameters are declared as `void *` on purpose:
 /// the caller retains object arguments for the duration of the call, while integer arguments
@@ -159,6 +161,88 @@ static Class ACCClientClass(void) {
         [out appendFormat:@"类枚举异常 %@：%@", exception.name, exception.reason];
     }
     return out;
+}
++ (NSArray<NSDictionary<NSString *, id> *> *)processSnapshot {
+    NSMutableArray<NSDictionary<NSString *, id> *> *rows = [NSMutableArray array];
+    int capacity = 4096;
+    pid_t *pids = calloc((size_t)capacity, sizeof(pid_t));
+    if (!pids) return rows;
+    int bytes = proc_listpids(PROC_ALL_PIDS, 0, pids, capacity * (int)sizeof(pid_t));
+    int count = bytes / (int)sizeof(pid_t);
+    for (int i = 0; i < count; i++) {
+        pid_t pid = pids[i];
+        if (pid <= 0) continue;
+        char name[64] = {0};
+        char path[4096] = {0};
+        proc_name(pid, name, sizeof(name));
+        proc_pidpath(pid, path, sizeof(path));
+        struct proc_bsdinfo info = {0};
+        NSString *started = @"?";
+        if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) > 0) {
+            started = [NSString stringWithFormat:@"ppid=%d uid=%u start=%llu", (int)info.pbi_ppid,
+                       (unsigned int)info.pbi_uid, (unsigned long long)info.pbi_start_tvsec];
+        }
+        [rows addObject:@{@"pid": @(pid), @"name": name[0] ? @(name) : @"",
+                          @"path": path[0] ? @(path) : @"", @"info": started}];
+    }
+    free(pids);
+    return rows;
+}
++ (NSString *)processListSummary {
+    NSArray<NSDictionary<NSString *, id> *> *rows = [self processSnapshot];
+    NSMutableString *out = [NSMutableString stringWithFormat:@"内核进程表共 %lu 个进程。", (unsigned long)rows.count];
+    NSMutableArray<NSString *> *interesting = [NSMutableArray array];
+    for (NSDictionary *row in rows) {
+        NSString *text = [NSString stringWithFormat:@"%@ %@", row[@"name"], row[@"path"]].lowercaseString;
+        if ([text containsString:@"car"] || [text containsString:@"play"]
+            || [text containsString:@"accessor"] || [text containsString:@"iap"]
+            || [text containsString:@"springboard"] || [text containsString:@"backboard"])
+            [interesting addObject:[NSString stringWithFormat:@"%@(pid %@)", row[@"name"], row[@"pid"]]];
+    }
+    [out appendFormat:@" Car/配件/界面相关 %lu 个：%@", (unsigned long)interesting.count,
+        [interesting componentsJoinedByString:@"，"]];
+    return out;
+}
++ (NSString *)processDetailFor:(NSArray<NSString *> *)needles {
+    NSArray<NSDictionary<NSString *, id> *> *rows = [self processSnapshot];
+    NSMutableArray<NSString *> *matched = [NSMutableArray array];
+    for (NSDictionary *row in rows) {
+        NSString *text = [NSString stringWithFormat:@"%@ %@", row[@"name"], row[@"path"]].lowercaseString;
+        for (NSString *needle in needles) {
+            if ([text containsString:needle.lowercaseString]) {
+                [matched addObject:[NSString stringWithFormat:@"%@ pid=%@ %@ %@",
+                    row[@"name"], row[@"pid"], row[@"path"], row[@"info"]]];
+                break;
+            }
+        }
+    }
+    return [matched componentsJoinedByString:@"｜"];
+}
++ (NSString *)ownEntitlements {
+    typedef void *(*CreateFromSelf)(const void *);
+    typedef void *(*CopyValue)(void *, void *, void *);
+    void *security = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY);
+    if (!security) return @"Security.framework 打不开";
+    CreateFromSelf create = (CreateFromSelf)dlsym(security, "SecTaskCreateFromSelf");
+    CopyValue copy = (CopyValue)dlsym(security, "SecTaskCopyValueForEntitlement");
+    if (!create || !copy) { dlclose(security); return @"SecTask 符号缺失"; }
+    void *task = create(NULL);
+    if (!task) { dlclose(security); return @"SecTaskCreateFromSelf 返回空"; }
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (NSString *key in @[@"platform-application", @"com.apple.private.security.no-sandbox",
+                            @"com.apple.private.security.no-container",
+                            @"com.apple.private.security.storage.Keychains",
+                            @"com.apple.developer.networking.wifi-info",
+                            @"com.apple.private.network.socketfilterfw"]) {
+        void *value = copy(task, (__bridge void *)key, NULL);
+        if (!value) { [lines addObject:[NSString stringWithFormat:@"%@=缺失", key]]; continue; }
+        NSString *text = [(__bridge id)value description];
+        [lines addObject:[NSString stringWithFormat:@"%@=%@", key, text]];
+        CFRelease(value);
+    }
+    CFRelease(task);
+    dlclose(security);
+    return [lines componentsJoinedByString:@"，"];
 }
 + (void)xpcProbe:(NSString *)service log:(void (^)(NSString *))log {
     if (service.length == 0 || !log) return;

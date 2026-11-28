@@ -38,6 +38,7 @@ final class SameDeviceProbe {
     private var experimentEndpointInitSelf = true
     private var experimentPropertyHandlers = true
     private var experimentExplicitPublish = false
+    private var experimentStopSession = false
     var onLog: ((String) -> Void)?
 
     private func hexPreview(_ data: Data, limit: Int = 96) -> String {
@@ -62,13 +63,14 @@ final class SameDeviceProbe {
         experimentEndpointInitSelf = defaults.object(forKey: "localEndpointInitSelf") as? Bool ?? true
         experimentPropertyHandlers = defaults.object(forKey: "localPropertyHandlers") as? Bool ?? true
         experimentExplicitPublish = defaults.bool(forKey: "localExplicitPublish")
+        experimentStopSession = defaults.bool(forKey: "localStopSessionProbe")
         transport.registerPropertyHandlers = experimentPropertyHandlers
         transport.publishExplicitly = experimentExplicitPublish
         effectiveTransportType = experimentTransportType
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let wifi = configuration.ssid.isEmpty ? "Wi-Fi 未填写"
             : "Wi-Fi \(configuration.ssid)/信道 \(configuration.wifiChannel)/\(configuration.password.isEmpty ? "开放网络" : "密码 \(configuration.password.utf8.count) 字节")"
-        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")，0x4301 目标=127.0.0.1=\(experimentLoopback ? "是" : "否")，0x4301 标识回填 0x4300=\(experimentMatchIdent ? "是" : "否")，ACC 自证=\(experimentAccSelfAuth ? "开" : "关")，端点 iAP2_Initialized 自填=\(experimentEndpointInitSelf ? "开" : "关")，属性回调注册=\(experimentPropertyHandlers ? "开" : "关")，显式发布连接=\(experimentExplicitPublish ? "是" : "否")")
+        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")，0x4301 目标=127.0.0.1=\(experimentLoopback ? "是" : "否")，0x4301 标识回填 0x4300=\(experimentMatchIdent ? "是" : "否")，ACC 自证=\(experimentAccSelfAuth ? "开" : "关")，端点 iAP2_Initialized 自填=\(experimentEndpointInitSelf ? "开" : "关")，属性回调注册=\(experimentPropertyHandlers ? "开" : "关")，显式发布连接=\(experimentExplicitPublish ? "是" : "否")，0x4302 探测=\(experimentStopSession ? "开" : "关")")
         onLog?("本机传输能力（CoreAccessories）：" + String(DirectAccessoryTransport.apiSummary().prefix(1500)))
         // 0x4300 的系统生成标识长得像 en0 MAC（28:02:44:b1:2b:c2）；把本机 MAC 打出来比对。
         // iOS 可能对 App 返回 02:00:00:00:00:00，这本身也是证据。
@@ -321,7 +323,7 @@ final class SameDeviceProbe {
             }
             if !requested && expectsLocalControl {
                 let run = generation
-                for delay in [3.0, 6.0, 9.0] {
+                for delay in [3.0, 6.0, 9.0, 15.0, 25.0, 35.0] {
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                         guard let self, self.active, self.generation == run, !self.controlConnected else { return }
                         do { try self.requestSession(configuration) }
@@ -330,6 +332,34 @@ final class SameDeviceProbe {
                 }
             }
             requested = true
+            // 40 秒时（超时前最后一刻）再快照一次：系统在整段窗口内的任何属性变化都能看到。
+            if !controlConnected {
+                let run = generation
+                DispatchQueue.main.asyncAfter(deadline: .now() + 40) { [weak self] in
+                    guard let self, self.active, self.generation == run else { return }
+                    self.transport.dumpConnectionState("等待 40 秒后（超时前）")
+                }
+            }
+            if experimentStopSession {
+                // 0x4302 = StopSession：真实接收端会在会话结束后发它；
+                // 若系统对它有应答（如 0x4303 RejectSession），说明会话层还在，只是不启动。
+                let run = generation
+                DispatchQueue.main.asyncAfter(deadline: .now() + 7) { [weak self] in
+                    guard let self, self.active, self.generation == run, !self.controlConnected else { return }
+                    do {
+                        let wifi = self.experimentSkipWifi ? nil : try AccessoryMessages.WiFi(
+                            ssid: configuration.ssid, password: configuration.password,
+                            channel: configuration.wifiChannel)
+                        let start = try AccessoryMessages.startSession(
+                            address: self.experimentLoopback ? "127.0.0.1" : configuration.address,
+                            port: configuration.port, deviceID: configuration.deviceID, wifi: wifi)
+                        self.onLog?("0x4302 探测 · 发送 StopSession，观察系统是否回复或改变属性")
+                        try self.send(IAP2Message(id: 0x4302, parameters: start.parameters))
+                    } catch {
+                        self.onLog?("0x4302 探测 · 构造或发送失败：\(error)")
+                    }
+                }
+            }
             stage(expectsLocalControl
                 ? "已请求在 \(configuration.address):\(configuration.port) 启动 CarPlay，会话正在等待 TCP 连接"
                 : "已向 \(configuration.name)（\(configuration.address):\(configuration.port)）请求 CarPlay。请保持此 App 运行并查看 iPad 画面。")

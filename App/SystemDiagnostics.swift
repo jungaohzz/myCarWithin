@@ -28,7 +28,12 @@ final class SystemDiagnostics: @unchecked Sendable {
             AppLog.record("系统诊断扫描开始 · \(reason)")
             scanPaths()
             scanCarPlayComponents()
+            scanAllMachServices()
             scanCoreAccessoriesClasses()
+            scanProcessTable()
+            scanEntitlements()
+            scanComponentDirectories()
+            scanCarPlayPreferenceFiles()
             scanLogDirectories()
             scanPreferences()
             scanDaemons()
@@ -122,6 +127,8 @@ final class SystemDiagnostics: @unchecked Sendable {
 
     // MARK: 路径与崩溃报告
 
+    private var bonjourProbe: BonjourBrowseProbe?
+
     private func scanPaths() {
         let paths = ["/usr/libexec/carplayd", "/usr/sbin/carplayd", "/usr/libexec/carkitd",
                      "/usr/libexec/airplayd", "/usr/sbin/airplayd", "/usr/libexec/iapd",
@@ -152,7 +159,6 @@ final class SystemDiagnostics: @unchecked Sendable {
     /// 0x4301 的消费逻辑，字符串就出现在谁里面。
     private func scanCarPlayComponents() {
         let daemons = ["/System/Library/LaunchDaemons", "/System/Library/LaunchAgents"]
-        var machServices: [String] = []
         for directory in daemons {
             let items = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
             let matched = items.filter { name in
@@ -170,7 +176,6 @@ final class SystemDiagnostics: @unchecked Sendable {
                     continue
                 }
                 let services = (plist["MachServices"] as? [String: Any])?.keys.sorted() ?? []
-                machServices.append(contentsOf: services)
                 let program = (plist["Program"] as? String) ?? (plist["BundleProgram"] as? String) ?? "?"
                 let runAtLoad = plist["RunAtLoad"] as? Bool ?? false
                 AppLog.record("系统诊断 · 任务 \(name)：程序 \(program)，RunAtLoad=\(runAtLoad)，MachServices=\(services.joined(separator: "，" ) )")
@@ -186,8 +191,99 @@ final class SystemDiagnostics: @unchecked Sendable {
         let frameworks = (try? FileManager.default.contentsOfDirectory(atPath: "/System/Library/PrivateFrameworks")) ?? []
         let carFrameworks = frameworks.filter { $0.lowercased().contains("car") }.sorted()
         AppLog.record("系统诊断 · PrivateFrameworks 共 \(frameworks.count) 项，名字含 Car 的 \(carFrameworks.count) 项：\(carFrameworks.prefix(40).joined(separator: "，"))")
-        probeMachServices(machServices)
         scanBinarySignatures()
+    }
+
+    /// 任务文件名不匹配但服务名匹配的情况会被上一个函数漏掉——这里读取全部
+    /// plist 的 MachServices 键再过滤，服务名才是 XPC 世界的真实名字。
+    private func scanAllMachServices() {
+        let directories = ["/System/Library/LaunchDaemons", "/System/Library/LaunchAgents",
+                           "/Library/LaunchDaemons", "/Library/LaunchAgents"]
+        var all: Set<String> = []
+        var total = 0
+        for directory in directories {
+            let items = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+            for name in items where name.hasSuffix(".plist") {
+                let path = directory + "/" + name
+                guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                      let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any]
+                else { continue }
+                total += 1
+                if let services = (plist["MachServices"] as? [String: Any])?.keys {
+                    all.formUnion(services)
+                }
+            }
+        }
+        let matched = all.filter { name in
+            let lower = name.lowercased()
+            return lower.contains("carplay") || lower.contains("carplayd") || lower.contains("airplay")
+                || lower.contains("accessor") || lower.contains("iap") || lower.contains("carp")
+        }.sorted()
+        AppLog.record("XPC 全量清单 · 解析 \(total) 个 launchd 任务，MachServices 共 \(all.count) 个，配件相关 \(matched.count) 个：\(matched.prefix(50).joined(separator: "，"))")
+        probeMachServices(matched)
+    }
+
+    /// 进程表是“系统里有没有消费 0x4301 的进程”的直接答案。ps 命令在 iOS 上
+    /// 不存在，libproc 是唯一通道（TrollStore 无沙盒下可读全表）。
+    private func scanProcessTable() {
+        let summary = DirectAccessoryTransport.processListSummary()
+        AppLog.record("系统诊断 · 进程表：\(summary)")
+        let detail = DirectAccessoryTransport.processDetailFor(["iapd", "carplay", "accessory", "airplay", "backboard"])
+        AppLog.record("系统诊断 · 关键进程详情：\(detail.isEmpty ? "无匹配" : detail)")
+    }
+
+    private func scanEntitlements() {
+        AppLog.record("系统诊断 · 本进程 entitlements：\(DirectAccessoryTransport.ownEntitlements())")
+    }
+
+    /// usr/libexec 是守护进程的家；SpringBoardPlugins 与 CoreServices 是界面侧。
+    /// 谁的名字里带 car/play/accessory/iap，谁就可能在消费 CarPlay 会话。
+    private func scanComponentDirectories() {
+        let targets: [(String, (String) -> Bool)] = [
+            ("/usr/libexec", { name in
+                let lower = name.lowercased()
+                return lower.contains("car") || lower.contains("play") || lower.contains("accessor")
+                    || lower.contains("iap") || lower.contains("airport") || lower.contains("wifi")
+            }),
+            ("/System/Library/SpringBoardPlugins", { _ in true }),
+            ("/System/Library/CoreServices", { name in
+                let lower = name.lowercased()
+                return lower.contains("car") || lower.contains("play") || lower.contains("accessor")
+            }),
+            ("/Library/LaunchDaemons", { _ in true }),
+        ]
+        for (directory, filter) in targets {
+            let items = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+            let matched = items.filter(filter).sorted()
+            AppLog.record("系统诊断 · \(directory) 共 \(items.count) 项，匹配 \(matched.count) 项：\(matched.prefix(40).joined(separator: "，"))")
+        }
+        for path in ["/var/jb", "/var/containers/Bundle/trollstore", "/usr/libexec/carplayd"] {
+            AppLog.record("系统诊断 · \(path) = \(FileManager.default.fileExists(atPath: path) ? "存在" : "不存在")")
+        }
+    }
+
+    /// 偏好目录里所有带 carplay/accessory 关键字的域全读出来：
+    /// carplayd 若曾在某处留下配置，会在这里出现。
+    private func scanCarPlayPreferenceFiles() {
+        let directory = "/var/mobile/Library/Preferences"
+        let items = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+        let matched = items.filter { name in
+            let lower = name.lowercased()
+            return lower.contains("car") || lower.contains("play") || lower.contains("accessor") || lower.contains("iap")
+        }.sorted()
+        AppLog.record("系统诊断 · 偏好文件：\(directory) 共 \(items.count) 项，匹配 \(matched.count) 项：\(matched.prefix(30).joined(separator: "，"))")
+        for name in matched.prefix(15) {
+            let path = directory + "/" + name
+            let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int ?? -1
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any]
+            else {
+                AppLog.record("系统诊断 · 偏好文件 \(name) 不可解析（\(size)B）")
+                continue
+            }
+            let keys = plist.keys.sorted().prefix(12)
+            AppLog.record("系统诊断 · 偏好文件 \(name) 共 \(plist.count) 键：\(keys.joined(separator: "，"))")
+        }
     }
 
     /// plist 里声明的服务名是权威清单：逐个 bootstrap 查找，命中就真连一次，
@@ -540,6 +636,88 @@ final class SystemDiagnostics: @unchecked Sendable {
         }
     }
 
+    // MARK: 多端口监听（系统可能回连到别的端口）
+
+    /// 0x4301 里的端口是我们替系统填的，但真机可能按自己的表回连其他端口。
+    /// 同时监听 CarPlay/AirPlay 常用端口：任何来源的连接都记下来，哪怕端口不对。
+    /// bind 失败也是证据——说明已有进程占着这个端口。
+    func listenProbePorts(_ ports: [UInt16], seconds: Int) {
+        captureQueue.async { [self] in
+            var descriptors: [Int32] = []
+            for port in ports {
+                let fd = socket(AF_INET, SOCK_STREAM, 0)
+                guard fd >= 0 else {
+                    AppLog.record("端口监听 · \(port)：socket 失败 errno \(errno)")
+                    continue
+                }
+                var reuse: Int32 = 1
+                _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+                var address = sockaddr_in()
+                address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+                address.sin_family = sa_family_t(AF_INET)
+                address.sin_port = port.bigEndian
+                address.sin_addr.s_addr = in_addr_t(INADDR_ANY)
+                let bound = withUnsafePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+                guard bound == 0 else {
+                    AppLog.record("端口监听 · \(port)：bind 失败 errno \(errno)（端口已被其他进程占用或无权限）")
+                    close(fd)
+                    continue
+                }
+                guard listen(fd, 8) == 0 else {
+                    AppLog.record("端口监听 · \(port)：listen 失败 errno \(errno)")
+                    close(fd)
+                    continue
+                }
+                AppLog.record("端口监听 · \(port)：已监听，等待系统回连")
+                descriptors.append(fd)
+                DispatchQueue.global(qos: .utility).async {
+                    while true {
+                        var peer = sockaddr_in()
+                        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+                        let client = withUnsafeMutablePointer(to: &peer) { pointer in
+                            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                                accept(fd, $0, &length)
+                            }
+                        }
+                        if client < 0 { return }
+                        var host = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                        var peerAddress = peer.sin_addr
+                        _ = inet_ntop(AF_INET, &peerAddress, &host, socklen_t(INET_ADDRSTRLEN))
+                        let source = String(cString: host)
+                        AppLog.record("端口监听 · \(port)：收到连接，来源 \(source):\(UInt16(bigEndian: peer.sin_port))")
+                        close(client)
+                    }
+                }
+            }
+            guard !descriptors.isEmpty else {
+                AppLog.record("端口监听 · 没有端口监听成功")
+                return
+            }
+            captureQueue.asyncAfter(deadline: .now() + .seconds(seconds)) { [self] in
+                for fd in descriptors { close(fd) }
+                AppLog.record("端口监听 · 结束，关闭 \(descriptors.count) 个监听端口")
+            }
+        }
+    }
+
+    // MARK: Bonjour（系统是否广播 CarPlay 服务）
+
+    /// 无线 CarPlay 的发现走 Bonjour：如果系统里有任何会话组件在广播
+    /// _carplay/_airplay/_raop 服务，浏览这里就能看到；全空则说明根本没有。
+    func browseCarPlayServices(seconds: Int) {
+        // NSNetServiceBrowser 依赖 run loop，必须在主线程启动。
+        DispatchQueue.main.async { [self] in
+            let probe = BonjourBrowseProbe()
+            bonjourProbe = probe
+            probe.start(types: ["_carplay._tcp.", "_carplay-rtsp._tcp.", "_airplay._tcp.",
+                                "_raop._tcp.", "_iapp._tcp.", "_appletv-v2._tcp."], seconds: seconds)
+        }
+    }
+
     // MARK: 自检：本机监听端口能否回连
 
     /// 证明 RTSP 端口在本机可回连；这样如果抓包也看不到 carplayd 的包，
@@ -646,5 +824,53 @@ final class SystemDiagnostics: @unchecked Sendable {
         formatter.dateFormat = "MM-dd HH:mm:ss"
         formatter.locale = Locale(identifier: "en_US_POSIX")
         return formatter.string(from: date)
+    }
+}
+
+/// NSNetServiceBrowser 需要 Objective-C 运行时承担 delegate 回调；
+/// 结果全部写进日志，不依赖任何系统进程配合。
+final class BonjourBrowseProbe: NSObject, NSNetServiceBrowserDelegate, NSNetServiceDelegate {
+    private var browsers: [NSNetServiceBrowser] = []
+    private var services: [NSNetService] = []
+    private var seen: Set<String> = []
+
+    func start(types: [String], seconds: Int) {
+        AppLog.record("Bonjour 浏览开始 · \(seconds) 秒 · 类型 \(types.joined(separator: "，"))")
+        for type in types {
+            let browser = NSNetServiceBrowser()
+            browser.delegate = self
+            browser.searchForServices(ofType: type, inDomain: "local.")
+            browsers.append(browser)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds)) { [weak self] in
+            guard let self else { return }
+            for browser in self.browsers { browser.stop() }
+            self.browsers.removeAll()
+            AppLog.record(self.seen.isEmpty
+                ? "Bonjour 浏览结束 · 未发现任何 CarPlay/AirPlay 服务（系统侧没有广播）"
+                : "Bonjour 浏览结束 · 共发现 \(self.seen.count) 个服务")
+        }
+    }
+
+    func netServiceBrowser(_ browser: NSNetServiceBrowser, didFind service: NSNetService, moreComing: Bool) {
+        let key = "\(service.type)|\(service.name)"
+        guard !seen.contains(key) else { return }
+        seen.insert(key)
+        AppLog.record("Bonjour 发现 · \(service.type) \(service.name)（\(service.domain)）")
+        service.delegate = self
+        services.append(service)
+        service.resolve(withTimeout: 2)
+    }
+
+    func netServiceBrowser(_ browser: NSNetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
+        AppLog.record("Bonjour 浏览失败 · \(errorDict)")
+    }
+
+    func netServiceDidResolveAddress(_ sender: NSNetService) {
+        AppLog.record("Bonjour 解析 · \(sender.type) \(sender.name) → \(sender.hostName ?? "?"):\(sender.port)")
+    }
+
+    func netService(_ sender: NSNetService, didNotResolve errorDict: [String: NSNumber]) {
+        AppLog.record("Bonjour 解析失败 · \(sender.type) \(sender.name)：\(errorDict)")
     }
 }

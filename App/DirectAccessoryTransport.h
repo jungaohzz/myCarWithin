@@ -36,5 +36,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// Opens a real XPC connection to a Mach service and reports handshake outcome.
 /// Connecting and cancelling is side-effect free; the daemon sees a short-lived client.
 + (void)xpcProbe:(NSString *)service log:(void (^)(NSString *message))log;
+/// Kernel process list via libproc. The ps/launchctl binaries are absent on iOS,
+/// so this is the only way to see whether iapd/carplay-like processes run at all.
++ (NSString *)processListSummary;
+/// Names and paths of processes whose name or path matches the given needles.
++ (NSString *)processDetailFor:(NSArray<NSString *> *)needles;
+/// This process's own entitlements via SecTask, to confirm no-sandbox took effect.
++ (NSString *)ownEntitlements;
 @end
 NS_ASSUME_NONNULL_END
