@@ -12,7 +12,10 @@ final class SystemDiagnostics: @unchecked Sendable {
     static let shared = SystemDiagnostics()
 
     private let queue = DispatchQueue(label: "CarWithin.systemdiagnostics", qos: .utility)
-    private let captureQueue = DispatchQueue(label: "CarWithin.systemdiagnostics.capture", qos: .utility)
+    // Concurrent so the 60-second log stream no longer queues behind the 70-second
+    // capture window; each job owns its fds/pids and AppLog serializes its own writes.
+    private let captureQueue = DispatchQueue(label: "CarWithin.systemdiagnostics.capture",
+                                             qos: .utility, attributes: .concurrent)
     private var lastScan = Date.distantPast
 
     // MARK: 本轮诊断进度（真实完成数 / 任务总数）
