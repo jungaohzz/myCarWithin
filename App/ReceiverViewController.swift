@@ -96,7 +96,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var localProgressTimer: Timer?
     private var localProgressStart: Date?
     private var localProgressBase = ""
-    private var localProgressLoggedSecond = -1
+    private var localDiagnosticsDone = 0
+    private var localDiagnosticsTotal = 0
     private let aspectRatioControl = ChoiceMenu(items: ["预设比例"] + ReceiverConfiguration.aspectRatios.map(\.title))
     private let resolutionControl = ChoiceMenu(items: ReceiverConfiguration.resolutions.map { "\($0.label)（\($0.width)×\($0.height)）" })
     private let frameRateControl = ChoiceMenu(items: ["自动", "30 FPS", "60 FPS"])
@@ -1707,30 +1708,42 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 var live = config; live.port = port
                 self.log("RTSP 监听器就绪，端口 \(port)；开始 0x4301 会话请求；应用状态=\(UIApplication.shared.applicationState == .active ? "前台" : "非前台")，保护数据可用=\(UIApplication.shared.isProtectedDataAvailable ? "是" : "否")")
                 self.controlBrowser.start()
-                // 证据链：daemon 是否在跑 → 端口能不能回连 → daemon 有没有发包 → 系统日志说了什么。
-                SystemDiagnostics.shared.kickstartCarPlayDaemon()
-                SystemDiagnostics.shared.probeCarPlayXPC()
-                SystemDiagnostics.shared.selfConnectTest(port: port)
-                SystemDiagnostics.shared.listenProbePorts([7001, 7002, 7100, 5000, 62078], seconds: 70)
-                SystemDiagnostics.shared.browseCarPlayServices(seconds: 25)
-                let loopback = UserDefaults.standard.bool(forKey: "localLoopbackSession")
-                SystemDiagnostics.shared.captureNetwork(interface: loopback ? "lo0" : "en0", seconds: 70)
-                SystemDiagnostics.shared.streamLogs(seconds: 60)
                 self.sameDevice.start(configuration: live, identity: identity)
                 self.startLocalProgress(base: "正在连接 CarPlay…")
-                // 最长的诊断窗口是抓包与端口监听 70 秒；到 75 秒时全部收口，
-                // 此时提示可以发送日志，避免用户在证据还在写入时导出。
-                DispatchQueue.main.asyncAfter(deadline: .now() + 75) { [weak self] in
+                // 证据链：daemon 是否在跑 → 端口能不能回连 → daemon 有没有发包 → 系统日志说了什么。
+                // 8 项任务：3 个即时探测 + Bonjour + 端口监听 + 抓包 + 日志流 + 12 秒全量扫描；
+                // 每项在自己的真实收口点回调，进度不是时间估算。
+                let diagnostics = SystemDiagnostics.shared
+                diagnostics.beginRound(total: 8) { [weak self] done, total in
                     guard let self, self.localDiagnosticsID == startupID else { return }
-                    self.localDiagnosticsID = nil
-                    self.log("诊断扫描窗口全部结束，可以发送日志")
-                    if !self.localProgressBase.isEmpty {
-                        self.statusLabel.text = "\(self.localProgressBase)（诊断采集完成，可以发送日志）"
+                    self.localDiagnosticsDone = done
+                    self.localDiagnosticsTotal = total
+                    if done >= total {
+                        self.finishLocalDiagnostics(startupID)
+                    } else {
+                        let elapsed = self.localProgressStart.map { Int(Date().timeIntervalSince($0)) } ?? 0
+                        self.log("诊断采集进度 \(done)/\(total) 项（已 \(elapsed) 秒）")
+                        self.renderLocalProgress()
                     }
-                    let presenter = self.settingsNavigation ?? self
-                    guard UIApplication.shared.applicationState == .active,
-                          presenter.presentedViewController == nil else { return }
-                    self.alert("诊断扫描完成", "所有探针已收口，现在可以到「日志」页导出并发送日志。")
+                }
+                diagnostics.kickstartCarPlayDaemon { diagnostics.advanceRound() }
+                diagnostics.probeCarPlayXPC { diagnostics.advanceRound() }
+                diagnostics.selfConnectTest(port: port) { diagnostics.advanceRound() }
+                diagnostics.listenProbePorts([7001, 7002, 7100, 5000, 62078], seconds: 70) {
+                    diagnostics.advanceRound()
+                }
+                diagnostics.browseCarPlayServices(seconds: 25) { diagnostics.advanceRound() }
+                let loopback = UserDefaults.standard.bool(forKey: "localLoopbackSession")
+                diagnostics.captureNetwork(interface: loopback ? "lo0" : "en0", seconds: 70) {
+                    diagnostics.advanceRound()
+                }
+                diagnostics.streamLogs(seconds: 60) { diagnostics.advanceRound() }
+                // 兜底：正常最长链路约 70 秒（串行队列下抓包+日志流叠加也不超过 150 秒），
+                // 任何一项回调丢失时 160 秒强制收口并说明，避免界面永远停在等待。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 160) { [weak self] in
+                    guard let self, self.localDiagnosticsID == startupID else { return }
+                    self.log("诊断进度兜底触发（\(self.localDiagnosticsDone)/\(self.localDiagnosticsTotal) 项已回调），强制收口")
+                    self.finishLocalDiagnostics(startupID)
                 }
             }
             prepareExternalOutput(configuration: config)
@@ -1740,7 +1753,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
                 // 会话失败也会走到这里：诊断扫描与连接状态无关，照样要拿证据。
                 guard let self, self.localDiagnosticsID == startupID else { return }
-                SystemDiagnostics.shared.scan(reason: "本机 CarPlay 启动后 12 秒")
+                SystemDiagnostics.shared.scan(reason: "本机 CarPlay 启动后 12 秒") {
+                    SystemDiagnostics.shared.advanceRound()
+                }
             }
             return
         }
@@ -1843,6 +1858,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         localStartupID = nil
         if !keepDiagnostics {
             localDiagnosticsID = nil
+            localDiagnosticsDone = 0
+            localDiagnosticsTotal = 0
+            SystemDiagnostics.shared.cancelRound()
             stopLocalProgress()
         }
         networkStartupTask?.cancel()
@@ -1874,8 +1892,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         log("CarPlay 接收已停止")
     }
 
-    /// 首页进度：诊断采集窗口最长 75 秒，期间状态行每秒刷新 X/75，
-    /// 每个十秒节点写一行日志，窗口结束改成“可以发送日志”。
+    /// 首页进度：真实采集进度（已完成项/总项数）+ 已用秒数。
+    /// 总项数在本轮启动时登记，每项在真实收口点回调，而不是按 75 秒估算。
     private func startLocalProgress(base: String) {
         stopLocalProgress()
         localProgressStart = Date()
@@ -1887,24 +1905,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 self.stopLocalProgress()
                 return
             }
-            let elapsed = Int(Date().timeIntervalSince(self.localProgressStart ?? Date()))
-            if elapsed >= 75 {
-                self.stopLocalProgress()
-                self.statusLabel.text = "\(self.localProgressBase)（诊断采集完成，可以发送日志）"
-                return
-            }
             self.renderLocalProgress()
-            if elapsed / 10 != self.localProgressLoggedSecond / 10 {
-                self.localProgressLoggedSecond = elapsed
-                self.log("诊断采集进度 \(elapsed)/75 秒")
-            }
         }
     }
     private func stopLocalProgress() {
         localProgressTimer?.invalidate()
         localProgressTimer = nil
         localProgressStart = nil
-        localProgressLoggedSecond = -1
     }
     /// Progress composes with the current base line, so a session failure message
     /// stays visible while the remaining capture windows finish.
@@ -1913,11 +1920,28 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         renderLocalProgress()
     }
     private func renderLocalProgress() {
+        guard !displayedVideo else { return }
         guard let start = localProgressStart else { statusLabel.text = localProgressBase; return }
-        let elapsed = min(Int(Date().timeIntervalSince(start)), 75)
-        statusLabel.text = elapsed >= 75
-            ? "\(localProgressBase)（诊断采集完成，可以发送日志）"
-            : "\(localProgressBase)（诊断采集 \(elapsed)/75 秒，请等待）"
+        let elapsed = Int(Date().timeIntervalSince(start))
+        if localDiagnosticsTotal > 0 {
+            statusLabel.text = "\(localProgressBase)（诊断采集 \(localDiagnosticsDone)/\(localDiagnosticsTotal) 项，已 \(elapsed) 秒，请等待）"
+        } else {
+            statusLabel.text = "\(localProgressBase)（诊断采集已 \(elapsed) 秒，请等待）"
+        }
+    }
+    /// 全部采集任务收口：写日志、状态行改为可发送，再弹框提示。
+    private func finishLocalDiagnostics(_ startupID: UUID) {
+        guard localDiagnosticsID == startupID else { return }
+        localDiagnosticsID = nil
+        stopLocalProgress()
+        log("诊断采集完成 \(localDiagnosticsDone)/\(localDiagnosticsTotal) 项，可以发送日志")
+        if !displayedVideo {
+            statusLabel.text = "\(localProgressBase)（诊断采集完成，可以发送日志）"
+        }
+        let presenter = settingsNavigation ?? self
+        guard UIApplication.shared.applicationState == .active,
+              presenter.presentedViewController == nil else { return }
+        alert("诊断采集完成", "\(localDiagnosticsDone)/\(localDiagnosticsTotal) 项探针全部收口，现在可以到「日志」页导出并发送日志。")
     }
 
     private func clearStartupHint() {

@@ -15,10 +15,50 @@ final class SystemDiagnostics: @unchecked Sendable {
     private let captureQueue = DispatchQueue(label: "CarWithin.systemdiagnostics.capture", qos: .utility)
     private var lastScan = Date.distantPast
 
+    // MARK: 本轮诊断进度（真实完成数 / 任务总数）
+
+    private var roundTotal = 0
+    private var roundDone = 0
+    private var roundHandler: ((Int, Int) -> Void)?
+    private let roundLock = NSLock()
+
+    /// 登记本机 CarPlay 启动后这一轮的采集任务总数，每项收口时调 advanceRound。
+    /// 进度来自真实回调而非时间估算：抓包/监听窗口结束、扫描跑完才计一项。
+    func beginRound(total: Int, onProgress: @escaping (_ done: Int, _ total: Int) -> Void) {
+        let count = max(total, 1)
+        roundLock.lock()
+        roundTotal = count
+        roundDone = 0
+        roundHandler = onProgress
+        roundLock.unlock()
+        onProgress(0, count)
+    }
+
+    func cancelRound() {
+        roundLock.lock()
+        roundTotal = 0
+        roundDone = 0
+        roundHandler = nil
+        roundLock.unlock()
+    }
+
+    func advanceRound() {
+        roundLock.lock()
+        guard roundTotal > 0 else { roundLock.unlock(); return }
+        roundDone += 1
+        let done = min(roundDone, roundTotal)
+        let total = roundTotal
+        let handler = roundHandler
+        if roundDone >= roundTotal { roundHandler = nil }
+        roundLock.unlock()
+        if let handler { DispatchQueue.main.async { handler(done, total) } }
+    }
+
     // MARK: 总扫描
 
-    func scan(reason: String) {
+    func scan(reason: String, completion: (() -> Void)? = nil) {
         queue.async { [self] in
+            defer { completion?() }
             let now = Date()
             guard now.timeIntervalSince(lastScan) >= 60 else {
                 AppLog.record("系统诊断扫描跳过（距上次不足 60 秒）· \(reason)")
@@ -690,8 +730,9 @@ final class SystemDiagnostics: @unchecked Sendable {
 
     /// 在投屏尝试期间实时记录 CarPlay 相关系统日志：daemon 的拒绝/崩溃会当场出现，
     /// 不用等它写进归档。OSLogStore 轮询通道优先；命令行通道作为对照保留。
-    func streamLogs(seconds: Int) {
+    func streamLogs(seconds: Int, completion: (() -> Void)? = nil) {
         captureQueue.async { [self] in
+            defer { completion?() }
             AppLog.record("实时系统日志开始 · 约 \(seconds) 秒 · CarPlay 相关")
             if let store = openUnifiedLogStore() {
                 sweepUnifiedLog(store: store, predicate: Self.carPlayPredicate, since: 60,
@@ -709,8 +750,9 @@ final class SystemDiagnostics: @unchecked Sendable {
 
     /// tcpdump 判断守护进程到底有没有向本机端口发起连接：抓到了就是自己这一侧的问题，
     /// 抓不到就是 carplayd 根本没尝试。没有 tcpdump 或没权限同样写入日志。
-    func captureNetwork(interface: String, seconds: Int) {
+    func captureNetwork(interface: String, seconds: Int, completion: (() -> Void)? = nil) {
         captureQueue.async { [self] in
+            defer { completion?() }
             guard FileManager.default.fileExists(atPath: "/usr/sbin/tcpdump") else {
                 AppLog.record("网络抓包跳过 · 本机没有 /usr/sbin/tcpdump（只能靠监听器和回连自测间接判断）")
                 return
@@ -727,7 +769,7 @@ final class SystemDiagnostics: @unchecked Sendable {
     /// 0x4301 里的端口是我们替系统填的，但真机可能按自己的表回连其他端口。
     /// 同时监听 CarPlay/AirPlay 常用端口：任何来源的连接都记下来，哪怕端口不对。
     /// bind 失败也是证据——说明已有进程占着这个端口。
-    func listenProbePorts(_ ports: [UInt16], seconds: Int) {
+    func listenProbePorts(_ ports: [UInt16], seconds: Int, completion: (() -> Void)? = nil) {
         captureQueue.async { [self] in
             var descriptors: [Int32] = []
             for port in ports {
@@ -781,11 +823,13 @@ final class SystemDiagnostics: @unchecked Sendable {
             }
             guard !descriptors.isEmpty else {
                 AppLog.record("端口监听 · 没有端口监听成功")
+                completion?()
                 return
             }
             captureQueue.asyncAfter(deadline: .now() + .seconds(seconds)) { [self] in
                 for fd in descriptors { close(fd) }
                 AppLog.record("端口监听 · 结束，关闭 \(descriptors.count) 个监听端口")
+                completion?()
             }
         }
     }
@@ -794,13 +838,14 @@ final class SystemDiagnostics: @unchecked Sendable {
 
     /// 无线 CarPlay 的发现走 Bonjour：如果系统里有任何会话组件在广播
     /// _carplay/_airplay/_raop 服务，浏览这里就能看到；全空则说明根本没有。
-    func browseCarPlayServices(seconds: Int) {
+    func browseCarPlayServices(seconds: Int, completion: (() -> Void)? = nil) {
         // NSNetServiceBrowser 依赖 run loop，必须在主线程启动。
         DispatchQueue.main.async { [self] in
             let probe = BonjourBrowseProbe()
             bonjourProbe = probe
             probe.start(types: ["_carplay._tcp.", "_carplay-rtsp._tcp.", "_airplay._tcp.",
-                                "_raop._tcp.", "_iapp._tcp.", "_appletv-v2._tcp."], seconds: seconds)
+                                "_raop._tcp.", "_iapp._tcp.", "_appletv-v2._tcp."], seconds: seconds,
+                        completion: completion)
         }
     }
 
@@ -808,8 +853,9 @@ final class SystemDiagnostics: @unchecked Sendable {
 
     /// 证明 RTSP 端口在本机可回连；这样如果抓包也看不到 carplayd 的包，
     /// 就能确定是守护进程没尝试，而不是我们的监听器有问题。
-    func selfConnectTest(port: UInt16) {
+    func selfConnectTest(port: UInt16, completion: (() -> Void)? = nil) {
         captureQueue.async {
+            defer { completion?() }
             let fd = socket(AF_INET, SOCK_STREAM, 0)
             guard fd >= 0 else {
                 AppLog.record("回连自测 · socket 创建失败（errno \(errno)）")
@@ -838,8 +884,9 @@ final class SystemDiagnostics: @unchecked Sendable {
     // MARK: 尝试让 launchd 启动 carplayd
 
     /// iOS 15 上 carplayd 可能根本没被拉起或被节流；kickstart 不需要重启、失败也能看原因。
-    func kickstartCarPlayDaemon() {
+    func kickstartCarPlayDaemon(completion: (() -> Void)? = nil) {
         captureQueue.async { [self] in
+            defer { completion?() }
             AppLog.record("carplayd 启动实验 · launchctl kickstart system/com.apple.carplayd")
             run(command: "launchctl kickstart system/com.apple.carplayd 2>&1; echo 退出码=$?",
                 maxSeconds: 6, maxLines: 20, tag: "carplayd 启动实验")
@@ -867,8 +914,9 @@ final class SystemDiagnostics: @unchecked Sendable {
     /// 编译期不可用（macOS 专属），能做的握手就是 bootstrap_look_up：kern_return 0
     /// 表示服务在 launchd 里注册且本 App 的命名空间可见，错误码则表示不可见。这就是
     /// 本实验的证据终点，不再有“连接存活”这一步。
-    func probeCarPlayXPC() {
+    func probeCarPlayXPC(completion: (() -> Void)? = nil) {
         captureQueue.async { [self] in
+            defer { completion?() }
             let candidates = [
                 "com.apple.carplayd",
                 "com.apple.carplayd.app.service",
@@ -920,7 +968,7 @@ final class BonjourBrowseProbe: NSObject, NSNetServiceBrowserDelegate, NSNetServ
     private var services: [NSNetService] = []
     private var seen: Set<String> = []
 
-    func start(types: [String], seconds: Int) {
+    func start(types: [String], seconds: Int, completion: (() -> Void)? = nil) {
         AppLog.record("Bonjour 浏览开始 · \(seconds) 秒 · 类型 \(types.joined(separator: "，"))")
         for type in types {
             let browser = NSNetServiceBrowser()
@@ -935,6 +983,7 @@ final class BonjourBrowseProbe: NSObject, NSNetServiceBrowserDelegate, NSNetServ
             AppLog.record(self.seen.isEmpty
                 ? "Bonjour 浏览结束 · 未发现任何 CarPlay/AirPlay 服务（系统侧没有广播）"
                 : "Bonjour 浏览结束 · 共发现 \(self.seen.count) 个服务")
+            completion?()
         }
     }
 
