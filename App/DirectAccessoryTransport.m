@@ -1,18 +1,56 @@
 #import "DirectAccessoryTransport.h"
 #import <TargetConditionals.h>
 #import <dlfcn.h>
+#import <errno.h>
 #import <malloc/malloc.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <xpc/xpc.h>
-#import <libproc.h>
 #import <mach/mach.h>
 #import <mach/mach_vm.h>
 #import <Security/Security.h>
+#import <stdlib.h>
+#import <string.h>
 #import <sys/sysctl.h>
+#import <sys/types.h>
 
-// Not in the public iOS SDK headers but exported by libsystem_kernel.
+// Not in the public iOS SDK headers, but exported by libsystem_kernel. The iOS SDK
+// ships no <libproc.h>, so the proc_* entry points this file uses are declared here
+// with the same signatures the XNU header has.
 extern int task_for_pid(mach_port_t target_tport, int pid, mach_port_t *t);
+extern int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
+extern int proc_name(int pid, void *buffer, uint32_t buffersize);
+extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
+extern int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize);
+
+// Byte-for-byte the bsd/sys/proc_info.h proc_bsdinfo layout (MAXCOMLEN == 16), so the
+// kernel fills it correctly when asked for PROC_PIDTBSDINFO.
+struct CWProcBSDInfo {
+    uint32_t pbi_flags;
+    uint32_t pbi_status;
+    uint32_t pbi_xstatus;
+    uint32_t pbi_pid;
+    uint32_t pbi_ppid;
+    uid_t pbi_uid;
+    gid_t pbi_gid;
+    uid_t pbi_ruid;
+    gid_t pbi_rgid;
+    uid_t pbi_svuid;
+    gid_t pbi_svgid;
+    uint32_t rfu_1;
+    char pbi_comm[16];
+    char pbi_name[32];
+    uint32_t pbi_nfiles;
+    uint32_t pbi_pgid;
+    uint32_t pbi_pjobc;
+    uint32_t e_tdev;
+    uint32_t e_tpgid;
+    int32_t pbi_nice;
+    uint64_t pbi_start_tvsec;
+    uint64_t pbi_start_tvusec;
+};
+#define CWPROC_ALL_PIDS 1
+#define CWPROC_PIDTBSDINFO 3
 
 /// Delegate callbacks we explicitly implement. Parameters are declared as `void *` on purpose:
 /// the caller retains object arguments for the duration of the call, while integer arguments
@@ -174,18 +212,18 @@ static Class ACCClientClass(void) {
     int capacity = 4096;
     pid_t *pids = calloc((size_t)capacity, sizeof(pid_t));
     if (!pids) return rows;
-    int bytes = proc_listpids(PROC_ALL_PIDS, 0, pids, capacity * (int)sizeof(pid_t));
+    int bytes = proc_listpids(CWPROC_ALL_PIDS, 0, pids, capacity * (int)sizeof(pid_t));
     int count = bytes / (int)sizeof(pid_t);
     for (int i = 0; i < count; i++) {
         pid_t pid = pids[i];
         if (pid <= 0) continue;
         char name[64] = {0};
         char path[4096] = {0};
-        proc_name(pid, name, sizeof(name));
-        proc_pidpath(pid, path, sizeof(path));
-        struct proc_bsdinfo info = {0};
+        proc_name(pid, name, (uint32_t)sizeof(name));
+        proc_pidpath(pid, path, (uint32_t)sizeof(path));
+        struct CWProcBSDInfo info = {0};
         NSString *started = @"?";
-        if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) > 0) {
+        if (proc_pidinfo(pid, CWPROC_PIDTBSDINFO, 0, &info, (int)sizeof(info)) > 0) {
             started = [NSString stringWithFormat:@"ppid=%d uid=%u start=%llu", (int)info.pbi_ppid,
                        (unsigned int)info.pbi_uid, (unsigned long long)info.pbi_start_tvsec];
         }
