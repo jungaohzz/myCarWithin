@@ -908,7 +908,26 @@ final class SystemDiagnostics: @unchecked Sendable {
                 AppLog.record("mDNS 查询 · 已发送 \(name) PTR 查询（\(sent) 字节）")
             }
             let deadline = Date().addingTimeInterval(TimeInterval(seconds))
-            var received = 0
+            var selfFrames = 0
+            var selfQueries = 0
+            var externalResponses = 0
+            // 只解问题段；压缩指针（0xC0）不会出现在问题名里。
+            func decodeQuestionName(_ packet: [UInt8], at start: Int) -> (String, Int)? {
+                var labels: [String] = []
+                var cursor = start
+                while cursor < packet.count {
+                    let length = Int(packet[cursor])
+                    if length == 0 { return (labels.joined(separator: "."), cursor + 1) }
+                    if (length & 0xC0) != 0 { return nil }
+                    let begin = cursor + 1
+                    guard begin + length <= packet.count,
+                          let label = String(bytes: packet[begin..<begin + length], encoding: .utf8)
+                    else { return nil }
+                    labels.append(label)
+                    cursor = begin + length
+                }
+                return nil
+            }
             while Date() < deadline {
                 var buffer = [UInt8](repeating: 0, count: 1616)
                 var source = sockaddr_in()
@@ -919,17 +938,44 @@ final class SystemDiagnostics: @unchecked Sendable {
                     }
                 }
                 if count > 0 {
-                    received += 1
                     var host = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
                     var peer = source.sin_addr
                     _ = inet_ntop(AF_INET, &peer, &host, socklen_t(INET_ADDRSTRLEN))
+                    let peerHost = String(cString: host)
+                    // 本机 5353 上同时能看到：我们原始查询的组播回环、mDNSResponder 的
+                    // 代答/浏览、以及我们自己的 NetServiceBrowser。只有其他地址发来的
+                    // QR=1 帧才算“外部响应方”，否则自己的回声会被误报成应答。
+                    let isResponse = count > 2 && (buffer[2] & 0x80) != 0
+                    let answers = count > 7 ? Int(buffer[6]) << 8 | Int(buffer[7]) : 0
+                    var detail = ""
+                    if !isResponse, count > 12 {
+                        let questions = Int(buffer[4]) << 8 | Int(buffer[5])
+                        var questionNames: [String] = []
+                        var offset = 12
+                        for _ in 0..<min(questions, 2) {
+                            guard let (name, next) = decodeQuestionName(buffer, at: offset) else { break }
+                            questionNames.append(name)
+                            offset = next + 4
+                        }
+                        if !questionNames.isEmpty { detail = " · 查询 \(questionNames.joined(separator: "、"))" }
+                    }
+                    let isSelf = wifi == peerHost
+                    if isSelf {
+                        selfFrames += 1
+                        if !isResponse { selfQueries += 1 }
+                    } else if isResponse {
+                        externalResponses += 1
+                    }
                     let hex = buffer[0..<min(count, 64)].map { String(format: "%02x", $0) }.joined()
-                    AppLog.record("mDNS 应答 · \(received) 来自 \(String(cString: host)):\(UInt16(bigEndian: source.sin_port)) · \(count) 字节 · 开头 \(hex)")
+                    AppLog.record("mDNS 帧 · 来自 \(peerHost):\(UInt16(bigEndian: source.sin_port)) · \(isResponse ? "响应（应答 \(answers)）" : "查询")\(detail) · \(count) 字节 · 开头 \(hex) · \(isSelf ? "本机回环" : "外部")")
                 } else {
                     usleep(50_000)
                 }
             }
-            AppLog.record("mDNS 查询结束 · \(names.count) 个查询，收到 \(received) 个应答\(received == 0 ? "（系统 mDNS 侧没有任何 CarPlay/AirPlay 应答）" : "")")
+            let selfSummary = selfFrames > 0
+                ? "本机回声 \(selfFrames) 帧（查询 \(selfQueries)、响应 \(selfFrames - selfQueries)），不计为应答"
+                : "无本机回声"
+            AppLog.record("mDNS 查询结束 · \(names.count) 个查询：外部应答 \(externalResponses) 个 · \(selfSummary)\(externalResponses == 0 ? "——本网段没有 CarPlay/AirPlay 响应方" : "")")
         }
     }
 

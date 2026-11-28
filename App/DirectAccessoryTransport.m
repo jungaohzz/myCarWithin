@@ -141,6 +141,19 @@ static NSString *DescribeArgument(void *pointer) {
     }
 }
 
+/// For call sites where the value is known to be an ObjC object. ACC property tables and
+/// handler callbacks hand back CF singletons (kCFBooleanTrue, __NSDictionary0__) that live
+/// in __DATA, so DescribeArgument's malloc_size gate mislabels them as "非堆指针".
+static NSString *DescribeObject(id object) {
+    if (!object) return @"nil";
+    @try {
+        NSString *text = [NSString stringWithFormat:@"%@", object];
+        return text.length > 320 ? [text substringToIndex:320] : text;
+    } @catch (NSException *exception) {
+        return [NSString stringWithFormat:@"无法描述的对象 %p", (__bridge void *)object];
+    }
+}
+
 @implementation ACCDelegateTrampoline
 - (void)reportLine:(NSString *)text {
     void (^block)(NSString *) = self.onLog;
@@ -820,7 +833,7 @@ static NSString *ReadRemoteString(mach_port_t task, uint64_t address, size_t lim
     }
     @try {
         id result = ((id (*)(id, SEL, id))objc_msgSend)(self.client, NSSelectorFromString(name), argument);
-        [self reportDiag:[NSString stringWithFormat:@"%@ · %@：%@", label, argument, DescribeArgument((__bridge void *)result)]];
+        [self reportDiag:[NSString stringWithFormat:@"%@ · %@：%@", label, argument, DescribeObject(result)]];
     } @catch (NSException *exception) {
         [self reportDiag:[NSString stringWithFormat:@"%@ · 调用异常 %@", label, exception.name]];
     }
@@ -970,7 +983,7 @@ static NSString *ReadRemoteString(mach_port_t task, uint64_t address, size_t lim
                 DirectAccessoryTransport *strongSelf = weakSelf;
                 if (!strongSelf) return;
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    [strongSelf reportDiag:[NSString stringWithFormat:@"ACC 处理器回调 · %@ = %@", key, DescribeArgument(value)]];
+                    [strongSelf reportDiag:[NSString stringWithFormat:@"ACC 处理器回调 · %@ = %@", key, DescribeObject((__bridge id)value)]];
                 });
             };
             @try {
@@ -1001,10 +1014,10 @@ static NSString *ReadRemoteString(mach_port_t task, uint64_t address, size_t lim
     if ([self.client respondsToSelector:server]) {
         @try {
             id connection = ((id (*)(id, SEL))objc_msgSend)(self.client, server);
-            [self reportDiag:[NSString stringWithFormat:@"ACC 服务连接 · %@", DescribeArgument((__bridge void *)connection)]];
+            [self reportDiag:[NSString stringWithFormat:@"ACC 服务连接 · %@", DescribeObject(connection)]];
             if (connection && [connection respondsToSelector:@selector(endpoint)]) {
                 id endpoint = ((id (*)(id, SEL))objc_msgSend)(connection, NSSelectorFromString(@"endpoint"));
-                [self reportDiag:[NSString stringWithFormat:@"ACC 服务连接端点 · %@", DescribeArgument((__bridge void *)endpoint)]];
+                [self reportDiag:[NSString stringWithFormat:@"ACC 服务连接端点 · %@", DescribeObject(endpoint)]];
             }
         } @catch (NSException *exception) {
             [self reportDiag:[NSString stringWithFormat:@"ACC 服务连接转储异常 %@", exception.name]];
@@ -1015,7 +1028,7 @@ static NSString *ReadRemoteString(mach_port_t task, uint64_t address, size_t lim
         if (![self.client respondsToSelector:selector]) continue;
         @try {
             id handlers = ((id (*)(id, SEL))objc_msgSend)(self.client, selector);
-            [self reportDiag:[NSString stringWithFormat:@"ACC 变更处理器表 · %@：%@", name, DescribeArgument((__bridge void *)handlers)]];
+            [self reportDiag:[NSString stringWithFormat:@"ACC 变更处理器表 · %@：%@", name, DescribeObject(handlers)]];
         } @catch (NSException *exception) {
             [self reportDiag:[NSString stringWithFormat:@"ACC 变更处理器表 · %@ 异常 %@", name, exception.name]];
         }
