@@ -1702,6 +1702,16 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 SystemDiagnostics.shared.captureNetwork(interface: loopback ? "lo0" : "en0", seconds: 70)
                 SystemDiagnostics.shared.streamLogs(seconds: 60)
                 self.sameDevice.start(configuration: live, identity: identity)
+                // 最长的诊断窗口是抓包与端口监听 70 秒；到 75 秒时全部收口，
+                // 此时提示可以发送日志，避免用户在证据还在写入时导出。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 75) { [weak self] in
+                    guard let self, self.running, self.localStartupID == startupID else { return }
+                    self.log("诊断扫描窗口全部结束，可以发送日志")
+                    let presenter = self.settingsNavigation ?? self
+                    guard UIApplication.shared.applicationState == .active,
+                          presenter.presentedViewController == nil else { return }
+                    self.alert("诊断扫描完成", "所有探针已收口，现在可以到「日志」页导出并发送日志。")
+                }
             }
             prepareExternalOutput(configuration: config)
             receiver.start(configuration: config, identity: identity, preferredViewer: primaryViewer)
