@@ -3,6 +3,7 @@
 #import <malloc/malloc.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import <xpc/xpc.h>
 
 /// Delegate callbacks we explicitly implement. Parameters are declared as `void *` on purpose:
 /// the caller retains object arguments for the duration of the call, while integer arguments
@@ -103,6 +104,91 @@ static Class ACCClientClass(void) {
         return [NSString stringWithFormat:@"枚举异常 %@：%@", exception.name, exception.reason];
     }
 }
++ (NSString *)coreAccessoriesClassSummary {
+    NSMutableString *out = [NSMutableString string];
+    @try {
+        unsigned int imageCount = 0;
+        const char **images = objc_copyImageNames(&imageCount);
+        NSMutableArray<NSString *> *loaded = [NSMutableArray array];
+        char *coreImage = NULL;
+        for (unsigned int i = 0; images && i < imageCount; i++) {
+            NSString *path = @(images[i]);
+            NSString *lower = path.lowercaseString;
+            if ([lower containsString:@"car"] || [lower containsString:@"air"]
+                || [lower containsString:@"accessor"] || [lower containsString:@"iap"])
+                [loaded addObject:path.lastPathComponent];
+            if (!coreImage && [lower containsString:@"coreaccessories.framework/coreaccessories"])
+                coreImage = strdup(images[i]);
+        }
+        if (images) free(images);
+        [out appendFormat:@"本进程已加载 Car/Air/配件镜像 %lu 个：%@。",
+            (unsigned long)loaded.count, [loaded componentsJoinedByString:@"，"]];
+        if (!coreImage) { [out appendString:@"CoreAccessories 镜像未加载。"]; return out; }
+        unsigned int classCount = 0;
+        const char **names = objc_copyClassNamesForImage(coreImage, &classCount);
+        free(coreImage);
+        NSMutableArray<NSString *> *matched = [NSMutableArray array];
+        for (unsigned int i = 0; names && i < classCount; i++) {
+            NSString *name = @(names[i]);
+            NSString *lower = name.lowercaseString;
+            if ([lower containsString:@"car"] || [lower containsString:@"air"]
+                || [lower containsString:@"session"] || [lower containsString:@"play"]
+                || [lower containsString:@"transport"] || [lower containsString:@"accessor"])
+                [matched addObject:name];
+        }
+        if (names) free(names);
+        [out appendFormat:@"CoreAccessories 共 %u 个类，命名相关的 %lu 个：%@。",
+            classCount, (unsigned long)matched.count,
+            [[matched subarrayWithRange:NSMakeRange(0, MIN(matched.count, (NSUInteger)40))] componentsJoinedByString:@"，"]];
+        unsigned int dumped = 0;
+        for (NSString *name in matched) {
+            if (dumped >= 3) break;
+            if (!([name.lowercaseString containsString:@"play"] || [name.lowercaseString containsString:@"session"])) continue;
+            Class cls = NSClassFromString(name);
+            if (!cls) continue;
+            unsigned int methodCount = 0;
+            Method *methods = class_copyMethodList(cls, &methodCount);
+            NSMutableArray<NSString *> *selectors = [NSMutableArray array];
+            for (unsigned int i = 0; methods && i < methodCount && i < 30; i++)
+                [selectors addObject:NSStringFromSelector(method_getName(methods[i]))];
+            if (methods) free(methods);
+            [out appendFormat:@"%@ 方法：%@。", name, [selectors componentsJoinedByString:@" "]];
+            dumped++;
+        }
+    } @catch (NSException *exception) {
+        [out appendFormat:@"类枚举异常 %@：%@", exception.name, exception.reason];
+    }
+    return out;
+}
++ (void)xpcProbe:(NSString *)service log:(void (^)(NSString *))log {
+    if (service.length == 0 || !log) return;
+    xpc_connection_t connection = xpc_connection_create_mach_service(service.UTF8String, NULL, 0);
+    if (!connection) {
+        log([NSString stringWithFormat:@"XPC 连接 · %@：创建失败", service]);
+        return;
+    }
+    xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
+        if (event == XPC_ERROR_CONNECTION_INVALID) {
+            log([NSString stringWithFormat:@"XPC 连接 · %@：连接无效（服务拒绝或不存在）", service]);
+        } else if (event == XPC_ERROR_CONNECTION_INTERRUPTED) {
+            log([NSString stringWithFormat:@"XPC 连接 · %@：连接中断", service]);
+        } else if (xpc_get_type(event) == XPC_TYPE_ERROR) {
+            const char *text = xpc_dictionary_get_string(event, XPC_ERROR_KEY_DESCRIPTION);
+            log([NSString stringWithFormat:@"XPC 连接 · %@：错误事件 %s", service, text ?: "未知"]);
+        } else if (xpc_get_type(event) == XPC_TYPE_DICTIONARY) {
+            log([NSString stringWithFormat:@"XPC 连接 · %@：收到字典回复（对端接受了空客户端）", service]);
+        } else {
+            log([NSString stringWithFormat:@"XPC 连接 · %@：收到非字典事件", service]);
+        }
+    });
+    xpc_connection_resume(connection);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        pid_t pid = xpc_connection_get_pid(connection);
+        log([NSString stringWithFormat:@"XPC 连接 · %@：1.5 秒后对端 pid=%d", service, (int)pid]);
+        xpc_connection_cancel(connection);
+    });
+}
 - (void)reportDiag:(NSString *)text {
     void (^block)(NSString *) = self.onDiagnostic;
     if (!block) return;
@@ -171,6 +257,16 @@ static Class ACCClientClass(void) {
         }
         self.connectionTypeDescription = usedType == 2 ? @"2" : @"1";
         self.connection = connection;
+        if (self.publishExplicitly && HasMethod(self.client, @"publishConnectionWithUUID:", 1)) {
+            @try {
+                ((void (*)(id, SEL, id))objc_msgSend)(self.client,
+                    NSSelectorFromString(@"publishConnectionWithUUID:"), self.connection);
+                [self reportDiag:@"ACC 显式发布 · publishConnectionWithUUID: 已调用"];
+            } @catch (NSException *exception) {
+                [self reportDiag:[NSString stringWithFormat:@"ACC 显式发布 · 异常 %@", exception.name]];
+            }
+        }
+        if (self.registerPropertyHandlers) [self installPropertyHandlers];
         self.generation = NSUUID.UUID;
         NSUUID *generation = self.generation;
         __weak DirectAccessoryTransport *weakSelf = self;
@@ -257,7 +353,7 @@ static Class ACCClientClass(void) {
         [self reportDiag:@"连接级认证 · isConnectionAuthenticated: 不可用"];
     }
     if (HasMethod(self.client, @"authStatusForConnectionWithUUID:authType:", 2)) {
-        for (NSUInteger type = 0; type <= 3; type++) {
+        for (NSUInteger type = 0; type <= 7; type++) {
             @try {
                 NSInteger status = ((NSInteger (*)(id, SEL, id, NSUInteger))objc_msgSend)(self.client,
                     NSSelectorFromString(@"authStatusForConnectionWithUUID:authType:"), self.connection, type);
@@ -275,6 +371,7 @@ static Class ACCClientClass(void) {
         [self dumpObjectMethod:@"accessoryInfoForEndpointWithUUID:" label:@"端点配件信息" argument:self.endpoint];
         [self dumpObjectMethod:@"connectionUUIDForEndpointWithUUID:" label:@"端点所属连接" argument:self.endpoint];
     }
+    [self dumpRuntime];
     [self dumpSignatures];
 }
 - (NSString *)authSummary {
@@ -335,6 +432,74 @@ static Class ACCClientClass(void) {
         [self reportDiag:[NSString stringWithFormat:@"ACC 自证 · 调用完成，随后状态：%@", [self authSummary]]];
     } @catch (NSException *exception) {
         [self reportDiag:[NSString stringWithFormat:@"ACC 自证 · 调用异常 %@，随后状态：%@", exception.name, [self authSummary]]];
+    }
+}
+- (void)installPropertyHandlers {
+    if (!self.client) return;
+    __weak DirectAccessoryTransport *weakSelf = self;
+    NSDictionary<NSString *, NSArray<NSString *> *> *groups = @{
+        @"setHandler:forConnectionProperty:": @[@"TransportType", @"ConnectionType", @"iAP2_Initialized"],
+        @"setHandler:forEndpointProperty:": @[@"iAP2_Initialized", @"CarPlayAvailable", @"CarPlayTransport"],
+    };
+    for (NSString *name in groups) {
+        if (!HasMethod(self.client, name, 2)) {
+            [self reportDiag:[NSString stringWithFormat:@"ACC 处理器 · %@ 不可用", name]];
+            continue;
+        }
+        for (NSString *key in groups[name]) {
+            void (^handler)(void *) = ^(void *value) {
+                DirectAccessoryTransport *strongSelf = weakSelf;
+                if (!strongSelf) return;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [strongSelf reportDiag:[NSString stringWithFormat:@"ACC 处理器回调 · %@ = %@", key, DescribeArgument(value)]];
+                });
+            };
+            @try {
+                ((void (*)(id, SEL, id, id))objc_msgSend)(self.client, NSSelectorFromString(name), handler, key);
+                [self reportDiag:[NSString stringWithFormat:@"ACC 处理器 · 已为 %@ 注册 %@", key, [name containsString:@"Endpoint"] ? @"端点" : @"连接"]];
+            } @catch (NSException *exception) {
+                [self reportDiag:[NSString stringWithFormat:@"ACC 处理器 · %@ 注册异常 %@", key, exception.name]];
+            }
+        }
+    }
+}
+- (void)dumpRuntime {
+    if (!self.client) return;
+    @try {
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(object_getClass(self.client), &count);
+        NSMutableArray<NSString *> *names = [NSMutableArray array];
+        for (unsigned int i = 0; ivars && i < count && i < 30; i++) {
+            const char *name = ivar_getName(ivars[i]);
+            [names addObject:name ? @(name) : @"?"];
+        }
+        if (ivars) free(ivars);
+        [self reportDiag:[NSString stringWithFormat:@"ACC 实例变量（%u 个）：%@", count, [names componentsJoinedByString:@" "]]];
+    } @catch (NSException *exception) {
+        [self reportDiag:[NSString stringWithFormat:@"ACC 实例变量转储异常 %@", exception.name]];
+    }
+    SEL server = NSSelectorFromString(@"serverConnection");
+    if ([self.client respondsToSelector:server]) {
+        @try {
+            id connection = ((id (*)(id, SEL))objc_msgSend)(self.client, server);
+            [self reportDiag:[NSString stringWithFormat:@"ACC 服务连接 · %@", DescribeArgument((__bridge void *)connection)]];
+            if (connection && [connection respondsToSelector:@selector(endpoint)]) {
+                id endpoint = ((id (*)(id, SEL))objc_msgSend)(connection, NSSelectorFromString(@"endpoint"));
+                [self reportDiag:[NSString stringWithFormat:@"ACC 服务连接端点 · %@", DescribeArgument((__bridge void *)endpoint)]];
+            }
+        } @catch (NSException *exception) {
+            [self reportDiag:[NSString stringWithFormat:@"ACC 服务连接转储异常 %@", exception.name]];
+        }
+    }
+    for (NSString *name in @[@"connectionPropertyChangeHandlers", @"endpointPropertyChangeHandlers"]) {
+        SEL selector = NSSelectorFromString(name);
+        if (![self.client respondsToSelector:selector]) continue;
+        @try {
+            id handlers = ((id (*)(id, SEL))objc_msgSend)(self.client, selector);
+            [self reportDiag:[NSString stringWithFormat:@"ACC 变更处理器表 · %@：%@", name, DescribeArgument((__bridge void *)handlers)]];
+        } @catch (NSException *exception) {
+            [self reportDiag:[NSString stringWithFormat:@"ACC 变更处理器表 · %@ 异常 %@", name, exception.name]];
+        }
     }
 }
 - (BOOL)writeProperty:(NSString *)key value:(id)value endpointLevel:(BOOL)endpointLevel {

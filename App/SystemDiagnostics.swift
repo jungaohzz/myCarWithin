@@ -28,6 +28,7 @@ final class SystemDiagnostics: @unchecked Sendable {
             AppLog.record("系统诊断扫描开始 · \(reason)")
             scanPaths()
             scanCarPlayComponents()
+            scanCoreAccessoriesClasses()
             scanLogDirectories()
             scanPreferences()
             scanDaemons()
@@ -134,6 +135,7 @@ final class SystemDiagnostics: @unchecked Sendable {
                      "/System/Library/PrivateFrameworks/CarAccessoryFramework.framework/CarAccessoryFramework",
                      "/System/Library/LaunchDaemons/com.apple.carplayd.plist",
                      "/System/Library/LaunchDaemons/com.apple.carkitd.plist",
+                     "/var/mobile/Library/Logs/CarPlay", "/var/mobile/Library/CarPlay", "/var/db/CarPlay",
                      "/var/mobile/Library/Logs/DiagnosticReports", "/var/mobile/Library/Logs/CrashReporter"]
         let present = paths.map { path -> String in
             guard FileManager.default.fileExists(atPath: path) else { return "\(path)=无" }
@@ -150,6 +152,7 @@ final class SystemDiagnostics: @unchecked Sendable {
     /// 0x4301 的消费逻辑，字符串就出现在谁里面。
     private func scanCarPlayComponents() {
         let daemons = ["/System/Library/LaunchDaemons", "/System/Library/LaunchAgents"]
+        var machServices: [String] = []
         for directory in daemons {
             let items = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
             let matched = items.filter { name in
@@ -167,6 +170,7 @@ final class SystemDiagnostics: @unchecked Sendable {
                     continue
                 }
                 let services = (plist["MachServices"] as? [String: Any])?.keys.sorted() ?? []
+                machServices.append(contentsOf: services)
                 let program = (plist["Program"] as? String) ?? (plist["BundleProgram"] as? String) ?? "?"
                 let runAtLoad = plist["RunAtLoad"] as? Bool ?? false
                 AppLog.record("系统诊断 · 任务 \(name)：程序 \(program)，RunAtLoad=\(runAtLoad)，MachServices=\(services.joined(separator: "，" ) )")
@@ -182,15 +186,49 @@ final class SystemDiagnostics: @unchecked Sendable {
         let frameworks = (try? FileManager.default.contentsOfDirectory(atPath: "/System/Library/PrivateFrameworks")) ?? []
         let carFrameworks = frameworks.filter { $0.lowercased().contains("car") }.sorted()
         AppLog.record("系统诊断 · PrivateFrameworks 共 \(frameworks.count) 项，名字含 Car 的 \(carFrameworks.count) 项：\(carFrameworks.prefix(40).joined(separator: "，"))")
+        probeMachServices(machServices)
         scanBinarySignatures()
+    }
+
+    /// plist 里声明的服务名是权威清单：逐个 bootstrap 查找，命中就真连一次，
+    /// 用连接握手结果区分“服务存在但不可见”和“可见但拒绝外部客户端”。
+    private func probeMachServices(_ names: [String]) {
+        let unique = Array(Set(names)).sorted().filter { name in
+            let lower = name.lowercased()
+            return lower.contains("car") || lower.contains("air")
+                || lower.contains("accessor") || lower.contains("iap")
+        }
+        guard !unique.isEmpty else {
+            AppLog.record("XPC 清单探测 · launchd plist 里没有 Car/Air/配件相关 MachServices")
+            return
+        }
+        AppLog.record("XPC 清单探测 · 候选 \(unique.count) 个：\(unique.prefix(40).joined(separator: "，"))")
+        for name in unique.prefix(40) {
+            guard let (result, port) = bootstrapLookupResult(name) else { continue }
+            if result == 0 {
+                AppLog.record("XPC 清单探测 · \(name)：命中（端口 \(port)），开始真实连接")
+                DirectAccessoryTransport.xpcProbe(name) { AppLog.record($0) }
+            } else {
+                AppLog.record("XPC 清单探测 · \(name)：错误码 \(result)")
+            }
+        }
+    }
+
+    /// CoreAccessories 自己导出了哪些 CarPlay 相关类：如果 15.6 的库里就有
+    /// 会话/播放类，说明逻辑存在、只差触发条件；没有则是系统版本硬限制的旁证。
+    private func scanCoreAccessoriesClasses() {
+        let summary = DirectAccessoryTransport.coreAccessoriesClassSummary()
+        AppLog.record("系统诊断 · CoreAccessories 类枚举：\(String(summary.prefix(4000)))")
     }
 
     /// 在候选二进制里找协议字符串：命中 “4301” 等说明该进程实现了 CarPlay 会话启动。
     private func scanBinarySignatures() {
         let binaries = ["/usr/libexec/iapd", "/usr/libexec/backboardd",
+                        "/System/Library/PrivateFrameworks/CoreAccessories.framework/CoreAccessories",
                         "/System/Library/PrivateFrameworks/CarPlay.framework/CarPlay",
-                        "/System/Library/PrivateFrameworks/CarKit.framework/CarKit"]
-        let needles = ["4301", "StartSession", "startSession", "CarPlay", "carplayd"]
+                        "/System/Library/PrivateFrameworks/CarKit.framework/CarKit",
+                        "/System/Library/PrivateFrameworks/CarAccessoryFramework.framework/CarAccessoryFramework"]
+        let needles = ["4301", "StartSession", "startSession", "CarPlay", "carplayd", "accessoryd", "iapd"]
         for path in binaries {
             guard let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int,
                   size > 0 else {

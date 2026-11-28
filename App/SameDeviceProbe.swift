@@ -36,6 +36,8 @@ final class SameDeviceProbe {
     private var experimentMatchIdent = false
     private var experimentAccSelfAuth = true
     private var experimentEndpointInitSelf = true
+    private var experimentPropertyHandlers = true
+    private var experimentExplicitPublish = false
     var onLog: ((String) -> Void)?
 
     private func hexPreview(_ data: Data, limit: Int = 96) -> String {
@@ -58,11 +60,15 @@ final class SameDeviceProbe {
         experimentMatchIdent = defaults.bool(forKey: "localMatch4300Ident")
         experimentAccSelfAuth = defaults.object(forKey: "localAccSelfAuth") as? Bool ?? true
         experimentEndpointInitSelf = defaults.object(forKey: "localEndpointInitSelf") as? Bool ?? true
+        experimentPropertyHandlers = defaults.object(forKey: "localPropertyHandlers") as? Bool ?? true
+        experimentExplicitPublish = defaults.bool(forKey: "localExplicitPublish")
+        transport.registerPropertyHandlers = experimentPropertyHandlers
+        transport.publishExplicitly = experimentExplicitPublish
         effectiveTransportType = experimentTransportType
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let wifi = configuration.ssid.isEmpty ? "Wi-Fi 未填写"
             : "Wi-Fi \(configuration.ssid)/信道 \(configuration.wifiChannel)/\(configuration.password.isEmpty ? "开放网络" : "密码 \(configuration.password.utf8.count) 字节")"
-        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")，0x4301 目标=127.0.0.1=\(experimentLoopback ? "是" : "否")，0x4301 标识回填 0x4300=\(experimentMatchIdent ? "是" : "否")，ACC 自证=\(experimentAccSelfAuth ? "开" : "关")，端点 iAP2_Initialized 自填=\(experimentEndpointInitSelf ? "开" : "关")")
+        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")，0x4301 目标=127.0.0.1=\(experimentLoopback ? "是" : "否")，0x4301 标识回填 0x4300=\(experimentMatchIdent ? "是" : "否")，ACC 自证=\(experimentAccSelfAuth ? "开" : "关")，端点 iAP2_Initialized 自填=\(experimentEndpointInitSelf ? "开" : "关")，属性回调注册=\(experimentPropertyHandlers ? "开" : "关")，显式发布连接=\(experimentExplicitPublish ? "是" : "否")")
         onLog?("本机传输能力（CoreAccessories）：" + String(DirectAccessoryTransport.apiSummary().prefix(1500)))
         // 0x4300 的系统生成标识长得像 en0 MAC（28:02:44:b1:2b:c2）；把本机 MAC 打出来比对。
         // iOS 可能对 App 返回 02:00:00:00:00:00，这本身也是证据。

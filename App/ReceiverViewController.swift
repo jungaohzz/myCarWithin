@@ -192,6 +192,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let localAccSelfAuthSwitch = UISwitch()
     /// 端点属性 iAP2_Initialized 自填实验：日志里该属性一直是 null，补写一次看系统反应。默认开启。
     private let localEndpointInitSwitch = UISwitch()
+    /// 属性变更回调注册实验：setHandler:forProperty: 可能与委托是两条独立回调路径。默认开启。
+    private let localPropertyHandlersSwitch = UISwitch()
+    /// 显式发布连接实验：在端点创建前单独调用 publishConnectionWithUUID:。默认关闭。
+    private let localExplicitPublishSwitch = UISwitch()
     private let localLoopbackControl = ChoiceMenu(items: ["自动（en0）", "127.0.0.1（实验）"])
     private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife", "AirPlay", "台铃 4.3 寸", "九号 5 寸", "极核 6.2 寸", "极核 AE2 5 寸"])
     private enum HeadUnitOutput: Int {
@@ -903,8 +907,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         defaults.set(localMatch4300Switch.isOn, forKey: "localMatch4300Ident")
         defaults.set(localAccSelfAuthSwitch.isOn, forKey: "localAccSelfAuth")
         defaults.set(localEndpointInitSwitch.isOn, forKey: "localEndpointInitSelf")
+        defaults.set(localPropertyHandlersSwitch.isOn, forKey: "localPropertyHandlers")
+        defaults.set(localExplicitPublishSwitch.isOn, forKey: "localExplicitPublish")
         defaults.set(loopback, forKey: "localLoopbackSession")
-        log("本机 CarPlay 实验设置：传输类型 \(transport)，0x1D01 仅 Wi-Fi 声明=\(localWifiOnlySwitch.isOn ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(localSkipWifiSwitch.isOn ? "是" : "否")，0x4301 目标=127.0.0.1=\(loopback ? "是" : "否")，0x4301 标识回填 0x4300=\(localMatch4300Switch.isOn ? "是" : "否")，ACC 自证=\(localAccSelfAuthSwitch.isOn ? "开" : "关")，端点 iAP2_Initialized 自填=\(localEndpointInitSwitch.isOn ? "开" : "关")；下一次启动本机 CarPlay 生效")
+        log("本机 CarPlay 实验设置：传输类型 \(transport)，0x1D01 仅 Wi-Fi 声明=\(localWifiOnlySwitch.isOn ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(localSkipWifiSwitch.isOn ? "是" : "否")，0x4301 目标=127.0.0.1=\(loopback ? "是" : "否")，0x4301 标识回填 0x4300=\(localMatch4300Switch.isOn ? "是" : "否")，ACC 自证=\(localAccSelfAuthSwitch.isOn ? "开" : "关")，端点 iAP2_Initialized 自填=\(localEndpointInitSwitch.isOn ? "开" : "关")，属性回调注册=\(localPropertyHandlersSwitch.isOn ? "开" : "关")，显式发布连接=\(localExplicitPublishSwitch.isOn ? "是" : "否")；下一次启动本机 CarPlay 生效")
     }
     @objc private func appearanceChanged() {
         UserDefaults.standard.set(appearanceControl.selectedSegmentIndex, forKey: "carPlayAppearance")
@@ -1675,7 +1681,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             receiver.onListening = { [weak self] port in
                 guard let self, self.running, self.localStartupID == startupID else { return }
                 var live = config; live.port = port
-                self.log("RTSP 监听器就绪，端口 \(port)；开始 0x4301 会话请求")
+                self.log("RTSP 监听器就绪，端口 \(port)；开始 0x4301 会话请求；应用状态=\(UIApplication.shared.applicationState == .active ? "前台" : "非前台")，保护数据可用=\(UIApplication.shared.isProtectedDataAvailable ? "是" : "否")")
                 self.controlBrowser.start()
                 // 证据链：daemon 是否在跑 → 端口能不能回连 → daemon 有没有发包 → 系统日志说了什么。
                 SystemDiagnostics.shared.kickstartCarPlayDaemon()
@@ -2140,6 +2146,10 @@ extension ReceiverViewController {
         localAccSelfAuthSwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
         localEndpointInitSwitch.isOn = defaults.object(forKey: "localEndpointInitSelf") as? Bool ?? true
         localEndpointInitSwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
+        localPropertyHandlersSwitch.isOn = defaults.object(forKey: "localPropertyHandlers") as? Bool ?? true
+        localPropertyHandlersSwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
+        localExplicitPublishSwitch.isOn = defaults.bool(forKey: "localExplicitPublish")
+        localExplicitPublishSwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
         localLoopbackControl.selectedSegmentIndex = defaults.bool(forKey: "localLoopbackSession") ? 1 : 0
         localLoopbackControl.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
         let savedOutput = defaults.object(forKey: "headUnitOutputV2") as? Int
@@ -3192,13 +3202,15 @@ extension ReceiverViewController {
     }
 
     private func experimentSections() -> [SettingsSection] {
-        var sections = [SettingsSection("iOS 15 本机 CarPlay 实验", footer: "iAP2 握手与 0x4301 在 iOS 15.6 已全部成功，但系统 CarPlay 守护进程从不回连。这些开关逐项改变配件声明与 0x4301 的组合，用来定位守护进程的判定条件；修改后下一次启动本机 CarPlay 才生效，日志会记录实际组合。传输类型 3 对应 0x4300 里声明的值，8 为旧实验，失败都会自动回退 2。0x4301 标识回填：参数 3 改用 0x4300 里系统生成的标识（优先 MAC 样式）。ACC 自证：iAP2 认证通过后尝试把 CoreAccessories 的连接级认证标志置为已认证。端点 iAP2_Initialized 自填：配件识别被接受后向端点属性写入该键，看系统接受、拒绝还是忽略。每次本机 CarPlay 启动还会：安装 ACC 委托探针并快照连接状态/属性/签名、尝试 kickstart carplayd、自测回连端口、抓包 70 秒、OSLogStore（本进程域，iOS 公开 API 读不到系统日志）与命令行双通道记录日志 60 秒、XPC 探测候选守护进程、12 秒后扫描崩溃报告/偏好/launchctl/进程表/关键路径、launchd 任务清单、CarPlay 框架清单、候选二进制里的 4301/CarPlay 字符串。读取失败同样写入日志。", [
+        var sections = [SettingsSection("iOS 15 本机 CarPlay 实验", footer: "iAP2 握手与 0x4301 在 iOS 15.6 已全部成功，但系统 CarPlay 守护进程从不回连。这些开关逐项改变配件声明与 0x4301 的组合，用来定位守护进程的判定条件；修改后下一次启动本机 CarPlay 才生效，日志会记录实际组合。传输类型 3 对应 0x4300 里声明的值，8 为旧实验，失败都会自动回退 2。0x4301 标识回填：参数 3 改用 0x4300 里系统生成的标识（优先 MAC 样式）。ACC 自证：iAP2 认证通过后尝试把 CoreAccessories 的连接级认证标志置为已认证。端点 iAP2_Initialized 自填：配件识别被接受后向端点属性写入该键，看系统接受、拒绝还是忽略。属性变更回调注册：为若干 CarPlay 相关属性键注册 setHandler 回调，与委托是两条独立路径。显式 publish 连接：端点创建前单独发布连接。每次本机 CarPlay 启动还会：安装 ACC 委托探针并快照连接状态/属性/签名、尝试 kickstart carplayd、自测回连端口、抓包 70 秒、OSLogStore（本进程域，iOS 公开 API 读不到系统日志）与命令行双通道记录日志 60 秒、XPC 探测候选守护进程、12 秒后扫描崩溃报告/偏好/launchctl/进程表/关键路径、launchd 任务清单、CarPlay 框架清单、候选二进制里的 4301/CarPlay 字符串、CoreAccessories 导出类与运行时转储、plist 里全部配件相关 MachServices（命中即真实连接握手）。读取失败同样写入日志。", [
             .control("本机传输类型", icon: ("cable.connector", .systemIndigo), localTransportControl),
             .control("0x1D01 仅声明 Wi-Fi 传输", icon: ("wifi", .systemBlue), localWifiOnlySwitch),
             .control("0x4301 跳过 Wi-Fi 凭据", icon: ("key.slash", .systemOrange), localSkipWifiSwitch),
             .control("0x4301 标识回填 0x4300", icon: ("shippingbox.fill", .systemBrown), localMatch4300Switch),
             .control("ACC 连接自证尝试", icon: ("checkmark.seal.fill", .systemMint), localAccSelfAuthSwitch),
             .control("端点 iAP2_Initialized 自填", icon: ("square.and.pencil", .systemGreen), localEndpointInitSwitch),
+            .control("属性变更回调注册", icon: ("bell.badge", .systemYellow), localPropertyHandlersSwitch),
+            .control("显式 publish 连接", icon: ("megaphone", .systemRed), localExplicitPublishSwitch),
             .control("0x4301 目标地址", icon: ("arrow.triangle.2.circlepath", .systemPurple), localLoopbackControl),
             .action("扫描系统诊断（崩溃报告 / 偏好 / 日志）", icon: ("stethoscope", .systemTeal)) { [unowned self] in
                 SystemDiagnostics.shared.scan(reason: "手动扫描")

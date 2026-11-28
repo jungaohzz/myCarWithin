@@ -26,5 +26,15 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)setEndpointProperty:(NSString *)key value:(id)value;
 /// Experiment: same for a connection-level property.
 - (BOOL)setConnectionProperty:(NSString *)key value:(id)value;
+/// Experiment: register property change handlers for plausible CarPlay keys.
+@property(nonatomic) BOOL registerPropertyHandlers;
+/// Experiment: call publishConnectionWithUUID: explicitly before the endpoint exists.
+@property(nonatomic) BOOL publishExplicitly;
+/// Every class CoreAccessories exports, filtered to Car/Air/Session names, with
+/// method lists for the interesting ones. Answers "does 15.6 even ship this logic".
++ (NSString *)coreAccessoriesClassSummary;
+/// Opens a real XPC connection to a Mach service and reports handshake outcome.
+/// Connecting and cancelling is side-effect free; the daemon sees a short-lived client.
++ (void)xpcProbe:(NSString *)service log:(void (^)(NSString *message))log;
 @end
 NS_ASSUME_NONNULL_END
