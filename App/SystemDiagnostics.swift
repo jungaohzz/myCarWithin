@@ -31,6 +31,11 @@ final class SystemDiagnostics: @unchecked Sendable {
             scanAllMachServices()
             scanCoreAccessoriesClasses()
             scanProcessTable()
+            scanRemoteProcessImages()
+            scanSharedCache()
+            scanSocketTable()
+            scanKeychainGroups()
+            scanPortOccupancy([7000, 49152, 53000, 3689, 8866, 8009, 47998, 4000, 4010, 61500, 47000])
             scanEntitlements()
             scanComponentDirectories()
             scanCarPlayPreferenceFiles()
@@ -368,7 +373,8 @@ final class SystemDiagnostics: @unchecked Sendable {
         let directories = [
             "/var/mobile/Library/Logs/DiagnosticReports",
             "/var/mobile/Library/Logs/CrashReporter",
-            "/var/mobile/Library/Logs"
+            "/var/mobile/Library/Logs",
+            "/var/log"
         ]
         for path in directories {
             let items: [String]
@@ -411,41 +417,121 @@ final class SystemDiagnostics: @unchecked Sendable {
         }
     }
 
+    // MARK: 远程镜像 / 共享缓存 / 套接字表 / Keychain / 端口占用
+
+    private func logBlock(_ tag: String, _ text: String) {
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            AppLog.record("系统诊断 · \(tag)｜\(line)")
+        }
+    }
+
+    /// task_for_pid + 远程 dyld 镜像枚举：正在运行的 iapd/backboardd/SpringBoard 是否
+    /// 加载了 CarPlay 代码。区分“代码在系统里但没进程用”与“这些进程里根本没有”。
+    private func scanRemoteProcessImages() {
+        logBlock("远程镜像", DirectAccessoryTransport.remoteImageListForProcessNames(["iapd", "backboardd", "SpringBoard"]))
+    }
+
+    /// _dyld_shared_cache_contains_path：CarPlay 相关框架是否存在于系统镜像，
+    /// 与是否有进程加载它们无关。
+    private func scanSharedCache() {
+        logBlock("共享缓存", DirectAccessoryTransport.sharedCacheContainment())
+    }
+
+    /// 内核 TCP 套接字表原始快照：系统里有没有进程在监听 CarPlay/RTSP 端口。
+    private func scanSocketTable() {
+        logBlock("套接字表", DirectAccessoryTransport.tcpSocketTableSummary())
+    }
+
+    /// 配件相关 Keychain 组：配对凭据是会话准入条件之一。
+    private func scanKeychainGroups() {
+        logBlock("Keychain", DirectAccessoryTransport.keychainSummary())
+    }
+
+    /// bind 占用探测：本机是否已有进程在监听 CarPlay 相关端口。本 App 自己监听的
+    /// 7001/7002/7100/5000/62078 不能进来，否则是自己的监听冒充证据。
+    private func scanPortOccupancy(_ ports: [UInt16]) {
+        for port in ports {
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+            guard fd >= 0 else {
+                AppLog.record("端口占用 · \(port)：socket 失败 errno \(errno)")
+                continue
+            }
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = port.bigEndian
+            address.sin_addr.s_addr = in_addr_t(INADDR_ANY)
+            let bound = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            if bound == 0 {
+                AppLog.record("端口占用 · \(port)：空闲（系统里没有进程监听）")
+                close(fd)
+            } else {
+                let code = errno
+                close(fd)
+                if code == EADDRINUSE {
+                    AppLog.record("端口占用 · \(port)：被占用（有进程在监听）")
+                } else {
+                    AppLog.record("端口占用 · \(port)：bind 失败 errno \(code)（非占用）")
+                }
+            }
+        }
+    }
+
     // MARK: CarPlay 偏好设置
 
     private func scanPreferences() {
-        for domain in ["com.apple.carplayd", "com.apple.carplay", "com.apple.CoreAccessories"] {
-            let values = CFPreferencesCopyMultiple(nil, domain as CFString,
-                                                   kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? [String: Any]
-            guard let values else {
-                AppLog.record("系统诊断 · 偏好域 \(domain) 读取不到（沙盒或不存在）")
-                continue
-            }
-            let names = values.keys.sorted()
-            AppLog.record("系统诊断 · 偏好域 \(domain) 共 \(names.count) 项：\(names.prefix(30).joined(separator: "，"))")
-            for name in names.prefix(20) {
-                let value = values[name]
-                let description: String
-                switch value {
-                case let number as NSNumber: description = number.stringValue
-                case let string as String: description = String(string.prefix(120))
-                case let date as Date: description = Self.stamp(date)
-                case let data as Data:
-                    let hex = data.prefix(48).map { String(format: "%02x", $0) }.joined()
-                    description = "Data \(data.count)B 开头 \(hex)"
-                case let array as [Any]: description = "数组 \(array.count) 项：\(String(describing: array.prefix(5)))"
-                case let dictionary as [String: Any]: description = "字典 \(dictionary.count) 键：\(dictionary.keys.sorted().prefix(8).joined(separator: "，"))"
-                case .some(let other): description = String(describing: type(of: other))
-                case .none: description = "nil"
-                }
-                AppLog.record("系统诊断 · \(domain)｜\(name) = \(description)")
+        let domains = ["com.apple.carplayd", "com.apple.carplay", "com.apple.CoreAccessories",
+                       "com.apple.iapd", "com.apple.carkit", "com.apple.AccessorySettings",
+                       "com.apple.airplay"]
+        let scopes: [(user: CFString, scope: String, quiet: Bool)] = [
+            (kCFPreferencesCurrentUser, "CurrentUser", false),
+            (kCFPreferencesAnyUser, "AnyUser", true)
+        ]
+        for entry in scopes {
+            for domain in domains {
+                scanPreferenceDomain(domain, user: entry.user, scope: entry.scope, quiet: entry.quiet)
             }
         }
         for file in ["/var/mobile/Library/Preferences/com.apple.carplay.plist",
                      "/var/mobile/Library/Preferences/com.apple.carplayd.plist",
-                     "/var/mobile/Library/Preferences/com.apple.CoreAccessories.plist"] {
+                     "/var/mobile/Library/Preferences/com.apple.CoreAccessories.plist",
+                     "/var/mobile/Library/Preferences/com.apple.iapd.plist",
+                     "/var/mobile/Library/Preferences/com.apple.AccessorySettings.plist"] {
             let size = (try? FileManager.default.attributesOfItem(atPath: file)[.size] as? Int) ?? nil
             AppLog.record("系统诊断 · 偏好文件 \(file) \(size.map { "\($0) 字节" } ?? "不存在或不可读")")
+        }
+    }
+
+    private func scanPreferenceDomain(_ domain: String, user: CFString, scope: String, quiet: Bool) {
+        let values = CFPreferencesCopyMultiple(nil, domain as CFString,
+                                               user, kCFPreferencesAnyHost) as? [String: Any]
+        guard let values else {
+            // AnyUser 域大多不存在，安静跳过，避免刷屏干扰 CurrentUser 的证据。
+            if !quiet { AppLog.record("系统诊断 · 偏好域 \(domain) 读取不到（沙盒或不存在）") }
+            return
+        }
+        let names = values.keys.sorted()
+        AppLog.record("系统诊断 · 偏好域 \(domain)（\(scope)）共 \(names.count) 项：\(names.prefix(30).joined(separator: "，"))")
+        for name in names.prefix(20) {
+            let value = values[name]
+            let description: String
+            switch value {
+            case let number as NSNumber: description = number.stringValue
+            case let string as String: description = String(string.prefix(120))
+            case let date as Date: description = Self.stamp(date)
+            case let data as Data:
+                let hex = data.prefix(48).map { String(format: "%02x", $0) }.joined()
+                description = "Data \(data.count)B 开头 \(hex)"
+            case let array as [Any]: description = "数组 \(array.count) 项：\(String(describing: array.prefix(5)))"
+            case let dictionary as [String: Any]: description = "字典 \(dictionary.count) 键：\(dictionary.keys.sorted().prefix(8).joined(separator: "，"))"
+            case .some(let other): description = String(describing: type(of: other))
+            case .none: description = "nil"
+            }
+            AppLog.record("系统诊断 · \(domain)（\(scope)）｜\(name) = \(description)")
         }
     }
 

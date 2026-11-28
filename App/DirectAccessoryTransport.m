@@ -5,7 +5,13 @@
 #import <objc/runtime.h>
 #import <xpc/xpc.h>
 #import <libproc.h>
+#import <mach/mach.h>
+#import <mach/mach_vm.h>
+#import <Security/Security.h>
 #import <sys/sysctl.h>
+
+// Not in the public iOS SDK headers but exported by libsystem_kernel.
+extern int task_for_pid(mach_port_t target_tport, int pid, mach_port_t *t);
 
 /// Delegate callbacks we explicitly implement. Parameters are declared as `void *` on purpose:
 /// the caller retains object arguments for the duration of the call, while integer arguments
@@ -243,6 +249,222 @@ static Class ACCClientClass(void) {
     CFRelease(task);
     dlclose(security);
     return [lines componentsJoinedByString:@"，"];
+}
+static NSString *ReadRemoteString(mach_port_t task, uint64_t address, size_t limit) {
+    if (address == 0 || limit == 0) return nil;
+    char *buffer = calloc(1, limit + 1);
+    if (!buffer) return nil;
+    mach_vm_size_t outsize = 0;
+    kern_return_t kr = mach_vm_read_overwrite(task, (mach_vm_address_t)address,
+        (mach_vm_size_t)limit, (mach_vm_address_t)(uintptr_t)buffer, &outsize);
+    NSString *result = nil;
+    if (kr == KERN_SUCCESS && outsize > 0) {
+        buffer[limit] = 0;
+        result = [NSString stringWithUTF8String:buffer];
+    }
+    free(buffer);
+    return result;
+}
++ (NSString *)remoteImageListForProcessNames:(NSArray<NSString *> *)names {
+    NSMutableString *out = [NSMutableString string];
+    NSArray<NSDictionary<NSString *, id> *> *rows = [self processSnapshot];
+    for (NSString *needle in names) {
+        @try {
+            NSDictionary *match = nil;
+            for (NSDictionary *row in rows) {
+                NSString *name = row[@"name"];
+                if (name && [name caseInsensitiveCompare:needle] == NSOrderedSame) { match = row; break; }
+            }
+            if (!match) { [out appendFormat:@"%@：进程表无此进程；", needle]; continue; }
+            pid_t pid = (pid_t)[match[@"pid"] intValue];
+            mach_port_t task = MACH_PORT_NULL;
+            int tfp = task_for_pid(mach_task_self(), (int)pid, &task);
+            if (tfp != 0 || task == MACH_PORT_NULL) {
+                [out appendFormat:@"%@(pid %d)：task_for_pid 失败 %d；", needle, (int)pid, tfp];
+                continue;
+            }
+            struct task_dyld_info dyldInfo = {0};
+            mach_msg_type_number_t infoCount = TASK_DYLD_INFO_COUNT;
+            kern_return_t infoKr = task_info(task, TASK_DYLD_INFO, (task_info_t)&dyldInfo, &infoCount);
+            if (infoKr != KERN_SUCCESS) {
+                [out appendFormat:@"%@(pid %d)：TASK_DYLD_INFO 失败 %d；", needle, (int)pid, infoKr];
+                mach_port_deallocate(mach_task_self(), task);
+                continue;
+            }
+            uint64_t arrayAddress = (uint64_t)dyldInfo.all_image_info_addr;
+            uint8_t head[32] = {0};
+            mach_vm_size_t got = 0;
+            if (arrayAddress == 0
+                || mach_vm_read_overwrite(task, arrayAddress, sizeof(head),
+                                          (mach_vm_address_t)(uintptr_t)head, &got) != KERN_SUCCESS
+                || got < 16) {
+                [out appendFormat:@"%@(pid %d)：读取 dyld 头部失败；", needle, (int)pid];
+                mach_port_deallocate(mach_task_self(), task);
+                continue;
+            }
+            uint32_t imageCount = 0;
+            memcpy(&imageCount, head + 4, 4);
+            uint64_t infoArray = 0;
+            memcpy(&infoArray, head + 8, 8);
+            if (imageCount > 4096) imageCount = 4096;
+            size_t tableBytes = (size_t)imageCount * 24;
+            uint8_t *table = malloc(tableBytes);
+            NSMutableArray<NSString *> *matched = [NSMutableArray array];
+            BOOL readOK = table && infoArray != 0
+                && mach_vm_read_overwrite(task, infoArray, (mach_vm_size_t)tableBytes,
+                                          (mach_vm_address_t)(uintptr_t)table, &got) == KERN_SUCCESS;
+            if (readOK) {
+                for (uint32_t i = 0; i < imageCount; i++) {
+                    uint64_t pathAddress = 0;
+                    memcpy(&pathAddress, table + (size_t)i * 24 + 8, 8);
+                    NSString *path = ReadRemoteString(task, pathAddress, 512);
+                    if (!path) continue;
+                    NSString *lower = path.lowercaseString;
+                    if ([lower containsString:@"car"] || [lower containsString:@"play"]
+                        || [lower containsString:@"accessor"] || [lower containsString:@"air"]
+                        || [lower containsString:@"iap"])
+                        [matched addObject:path.lastPathComponent];
+                }
+            }
+            free(table);
+            mach_port_deallocate(mach_task_self(), task);
+            if (!readOK) { [out appendFormat:@"%@(pid %d)：读取镜像数组失败；", needle, (int)pid]; continue; }
+            [out appendFormat:@"%@(pid %d)：共 %u 个镜像，Car/Play/配件相关 %lu 个：%@；",
+                needle, (int)pid, imageCount, (unsigned long)matched.count,
+                matched.count > 0 ? [matched componentsJoinedByString:@"，"] : @"无"];
+        } @catch (NSException *exception) {
+            [out appendFormat:@"%@：异常 %@；", needle, exception.name];
+        }
+    }
+    return out;
+}
++ (NSString *)sharedCacheContainment {
+    void *handle = dlopen("/usr/lib/system/libdyld.dylib", RTLD_LAZY);
+    typedef BOOL (*ContainsPath)(const char *);
+    ContainsPath contains = handle ? (ContainsPath)dlsym(handle, "_dyld_shared_cache_contains_path") : NULL;
+    if (!contains) {
+        if (handle) dlclose(handle);
+        return @"_dyld_shared_cache_contains_path 不可用";
+    }
+    NSArray<NSString *> *paths = @[
+        @"/System/Library/PrivateFrameworks/CarPlay.framework/CarPlay",
+        @"/System/Library/PrivateFrameworks/CarKit.framework/CarKit",
+        @"/System/Library/PrivateFrameworks/CarPlayServices.framework/CarPlayServices",
+        @"/System/Library/PrivateFrameworks/CarPlayUIServices.framework/CarPlayUIServices",
+        @"/System/Library/PrivateFrameworks/CarAccessoryFramework.framework/CarAccessoryFramework",
+        @"/System/Library/PrivateFrameworks/CoreAccessories.framework/CoreAccessories",
+        @"/System/Library/PrivateFrameworks/AirPlaySender.framework/AirPlaySender",
+        @"/usr/libexec/carplayd",
+        @"/usr/libexec/carkitd",
+    ];
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (NSString *path in paths)
+        [lines addObject:[NSString stringWithFormat:@"%@=%@", path.lastPathComponent,
+                          contains(path.UTF8String) ? @"在共享缓存" : @"不在"]];
+    dlclose(handle);
+    return [lines componentsJoinedByString:@"，"];
+}
++ (NSString *)tcpSocketTableSummary {
+    size_t length = 0;
+    int result = sysctlbyname("net.inet.tcp.pcblist", NULL, &length, NULL, 0);
+    if (result != 0 || length == 0)
+        return [NSString stringWithFormat:@"net.inet.tcp.pcblist 查询失败 errno %d（长度 %zu）", errno, length];
+    uint8_t *buffer = malloc(length);
+    if (!buffer) return @"内存不足";
+    result = sysctlbyname("net.inet.tcp.pcblist", buffer, &length, NULL, 0);
+    if (result != 0) {
+        int code = errno;
+        free(buffer);
+        return [NSString stringWithFormat:@"net.inet.tcp.pcblist 读取失败 errno %d", code];
+    }
+    uint32_t offset = 0;
+    int records = 0;
+    NSMutableString *samples = [NSMutableString string];
+    while (offset + 16 <= length) {
+        uint32_t recordLength = 0;
+        memcpy(&recordLength, buffer + offset, 4);
+        if (recordLength < 16 || offset + recordLength > length) break;
+        records++;
+        if (records <= 8) {
+            size_t dump = MIN((size_t)recordLength, (size_t)96);
+            [samples appendFormat:@"[%d]", records];
+            for (size_t i = 0; i < dump; i++) [samples appendFormat:@"%02x", buffer[offset + i]];
+            [samples appendString:@" "];
+        }
+        offset += recordLength;
+    }
+    free(buffer);
+    return [NSString stringWithFormat:@"net.inet.tcp.pcblist %zu 字节、记录 %d 条；前 8 条原始字节：%@",
+            length, records, samples];
+}
++ (NSString *)keychainSummary {
+    NSMutableString *out = [NSMutableString string];
+    NSArray<NSString *> *groups = @[@"apple-isc-keychain", @"com.apple.token",
+                                    @"com.apple.carplay", @"com.apple.carplayd", @"com.apple.airplay"];
+    for (NSString *group in groups) {
+        @try {
+            NSDictionary *query = @{
+                (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                (__bridge id)kSecAttrAccessGroup: group,
+                (__bridge id)kSecReturnAttributes: @YES,
+                (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitAll,
+            };
+            CFTypeRef result = NULL;
+            OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+            if (status != errSecSuccess || !result) {
+                [out appendFormat:@"%@：状态 %d；", group, (int)status];
+                continue;
+            }
+            NSArray *items = nil;
+            if ([(__bridge id)result isKindOfClass:[NSArray class]]) items = (__bridge_transfer NSArray *)result;
+            else items = @[(__bridge_transfer id)result];
+            [out appendFormat:@"%@：%lu 项", group, (unsigned long)items.count];
+            for (NSDictionary *item in [items subarrayWithRange:NSMakeRange(0, MIN(items.count, (NSUInteger)8))]) {
+                if (![item isKindOfClass:[NSDictionary class]]) continue;
+                [out appendFormat:@"｜服务=%@ 账户=%@ 标签=%@ 组=%@", item[(__bridge id)kSecAttrService] ?: @"-",
+                    item[(__bridge id)kSecAttrAccount] ?: @"-", item[(__bridge id)kSecAttrLabel] ?: @"-",
+                    item[(__bridge id)kSecAttrAccessGroup] ?: @"-"];
+            }
+            [out appendString:@"；"];
+        } @catch (NSException *exception) {
+            [out appendFormat:@"%@：异常 %@；", group, exception.name];
+        }
+    }
+    return out;
+}
+- (void)sweepConnectionTypes {
+    Class cls = ACCClientClass();
+    if (!cls || !HasMethod(cls, @"sharedClient", 0)) {
+        [self reportDiag:@"ACC 类型扫描 · 客户端不可用"];
+        return;
+    }
+    id client = ((id (*)(id, SEL))objc_msgSend)(cls, NSSelectorFromString(@"sharedClient"));
+    if (!HasMethod(client, @"createConnectionWithType:andIdentifier:", 2)
+        || !HasMethod(client, @"destroyConnectionWithUUID:", 1)) {
+        [self reportDiag:@"ACC 类型扫描 · 创建/销毁方法不可用"];
+        return;
+    }
+    NSMutableString *out = [NSMutableString string];
+    for (NSUInteger type = 0; type <= 5; type++) {
+        @try {
+            NSString *identifier = [NSString stringWithFormat:@"CarWithinSweep%lu", (unsigned long)type];
+            id created = ((id (*)(id, SEL, NSUInteger, id))objc_msgSend)(client,
+                NSSelectorFromString(@"createConnectionWithType:andIdentifier:"), type, identifier);
+            if ([created isKindOfClass:NSString.class]) {
+                NSString *uuid = created;
+                [out appendFormat:@"type %lu → 接受（%@）；", (unsigned long)type,
+                    uuid.length > 16 ? [uuid substringToIndex:16] : uuid];
+                ((void (*)(id, SEL, id))objc_msgSend)(client,
+                    NSSelectorFromString(@"destroyConnectionWithUUID:"), created);
+            } else {
+                [out appendFormat:@"type %lu → %@；", (unsigned long)type,
+                    created ? [NSString stringWithFormat:@"非 UUID 返回（%@）", NSStringFromClass([created class])] : @"拒绝(nil)"];
+            }
+        } @catch (NSException *exception) {
+            [out appendFormat:@"type %lu 异常 %@；", (unsigned long)type, exception.name];
+        }
+    }
+    [self reportDiag:[NSString stringWithFormat:@"ACC 连接类型扫描（0–5，逐个创建后销毁）：%@", out]];
 }
 + (void)xpcProbe:(NSString *)service log:(void (^)(NSString *))log {
     if (service.length == 0 || !log) return;

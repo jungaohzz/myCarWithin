@@ -39,6 +39,8 @@ final class SameDeviceProbe {
     private var experimentPropertyHandlers = true
     private var experimentExplicitPublish = false
     private var experimentStopSession = false
+    private var experimentSweepTypes = true
+    private var experimentConnInitSelf = true
     var onLog: ((String) -> Void)?
 
     private func hexPreview(_ data: Data, limit: Int = 96) -> String {
@@ -64,13 +66,15 @@ final class SameDeviceProbe {
         experimentPropertyHandlers = defaults.object(forKey: "localPropertyHandlers") as? Bool ?? true
         experimentExplicitPublish = defaults.bool(forKey: "localExplicitPublish")
         experimentStopSession = defaults.bool(forKey: "localStopSessionProbe")
+        experimentSweepTypes = defaults.object(forKey: "localSweepTypes") as? Bool ?? true
+        experimentConnInitSelf = defaults.object(forKey: "localConnInitSelf") as? Bool ?? true
         transport.registerPropertyHandlers = experimentPropertyHandlers
         transport.publishExplicitly = experimentExplicitPublish
         effectiveTransportType = experimentTransportType
         let os = ProcessInfo.processInfo.operatingSystemVersion
         let wifi = configuration.ssid.isEmpty ? "Wi-Fi 未填写"
             : "Wi-Fi \(configuration.ssid)/信道 \(configuration.wifiChannel)/\(configuration.password.isEmpty ? "开放网络" : "密码 \(configuration.password.utf8.count) 字节")"
-        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")，0x4301 目标=127.0.0.1=\(experimentLoopback ? "是" : "否")，0x4301 标识回填 0x4300=\(experimentMatchIdent ? "是" : "否")，ACC 自证=\(experimentAccSelfAuth ? "开" : "关")，端点 iAP2_Initialized 自填=\(experimentEndpointInitSelf ? "开" : "关")，属性回调注册=\(experimentPropertyHandlers ? "开" : "关")，显式发布连接=\(experimentExplicitPublish ? "是" : "否")，0x4302 探测=\(experimentStopSession ? "开" : "关")")
+        stage("本机 CarPlay 启动 · iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion) · 配件 \(configuration.deviceID) · 回调 \(configuration.address):\(configuration.port) · \(wifi) · 传输类型 \(experimentTransportType) · 期望控制连接=\(expectsLocalControl) · 实验：0x1D01 仅 Wi-Fi 声明=\(experimentWifiOnly ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(experimentSkipWifi ? "是" : "否")，0x4301 目标=127.0.0.1=\(experimentLoopback ? "是" : "否")，0x4301 标识回填 0x4300=\(experimentMatchIdent ? "是" : "否")，ACC 自证=\(experimentAccSelfAuth ? "开" : "关")，端点 iAP2_Initialized 自填=\(experimentEndpointInitSelf ? "开" : "关")，属性回调注册=\(experimentPropertyHandlers ? "开" : "关")，显式发布连接=\(experimentExplicitPublish ? "是" : "否")，0x4302 探测=\(experimentStopSession ? "开" : "关")，连接类型扫描=\(experimentSweepTypes ? "开" : "关")，连接 iAP2_Initialized 自填=\(experimentConnInitSelf ? "开" : "关")")
         onLog?("本机传输能力（CoreAccessories）：" + String(DirectAccessoryTransport.apiSummary().prefix(1500)))
         // 0x4300 的系统生成标识长得像 en0 MAC（28:02:44:b1:2b:c2）；把本机 MAC 打出来比对。
         // iOS 可能对 App 返回 02:00:00:00:00:00，这本身也是证据。
@@ -79,6 +83,10 @@ final class SameDeviceProbe {
             self?.onLog?(message)
         }
         if !AppLog.localCarPlaySupport.supported { onLog?("警告：\(AppLog.localCarPlaySupport.summary)") }
+        if experimentSweepTypes {
+            onLog?("ACC 类型扫描 · 创建并销毁类型 0–5 的临时连接，映射本机接受哪些连接类型")
+            transport.sweepConnectionTypes()
+        }
         let run = generation
         transport.onData = { [weak self] data in self?.receive(data) }
         do {
@@ -274,6 +282,11 @@ final class SameDeviceProbe {
             // 也是自证实验（把连接标成已认证）的最佳时机。
             transport.dumpConnectionState("iAP2 认证通过后")
             if experimentAccSelfAuth { transport.attemptSelfAuthentication() }
+            if experimentConnInitSelf {
+                let accepted = transport.setConnectionProperty("iAP2_Initialized", value: NSNumber(value: true))
+                onLog?("连接属性自填 · iAP2_Initialized=true 调用\(accepted ? "完成" : "未发出")")
+                transport.dumpConnectionState("连接 iAP2_Initialized 自填后")
+            }
         case 0x1d00: try send(AccessoryMessages.identification(name: configuration.name, deviceID: configuration.deviceID,
                                                               wifiOnly: experimentWifiOnly))
         case 0x1d02:
@@ -281,7 +294,7 @@ final class SameDeviceProbe {
             // 日志里端点属性 iAP2_Initialized 一直是 <null>：补一次显式写入，
             // 看 CoreAccessories 接受、拒绝还是忽略——三种结果都是证据。
             if experimentEndpointInitSelf {
-                let accepted = transport.setEndpointProperty("iAP2_Initialized", value: true)
+                let accepted = transport.setEndpointProperty("iAP2_Initialized", value: NSNumber(value: true))
                 onLog?("端点属性自填 · iAP2_Initialized=true 调用\(accepted ? "完成" : "未发出")")
                 transport.dumpConnectionState("端点 iAP2_Initialized 自填后")
             }

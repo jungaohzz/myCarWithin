@@ -198,6 +198,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let localExplicitPublishSwitch = UISwitch()
     /// 0x4302 StopSession 探测：会话层若还在，系统会对停止请求有反应。默认关闭。
     private let localStopSessionSwitch = UISwitch()
+    /// 连接类型 0–5 扫描：映射这份 CoreAccessories 接受哪些连接类型。默认开启。
+    private let localSweepTypesSwitch = UISwitch()
+    /// 连接属性 iAP2_Initialized 自填：认证通过后向连接属性写该键。默认开启。
+    private let localConnInitSwitch = UISwitch()
     private let localLoopbackControl = ChoiceMenu(items: ["自动（en0）", "127.0.0.1（实验）"])
     private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife", "AirPlay", "台铃 4.3 寸", "九号 5 寸", "极核 6.2 寸", "极核 AE2 5 寸"])
     private enum HeadUnitOutput: Int {
@@ -912,8 +916,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         defaults.set(localPropertyHandlersSwitch.isOn, forKey: "localPropertyHandlers")
         defaults.set(localExplicitPublishSwitch.isOn, forKey: "localExplicitPublish")
         defaults.set(localStopSessionSwitch.isOn, forKey: "localStopSessionProbe")
+        defaults.set(localSweepTypesSwitch.isOn, forKey: "localSweepTypes")
+        defaults.set(localConnInitSwitch.isOn, forKey: "localConnInitSelf")
         defaults.set(loopback, forKey: "localLoopbackSession")
-        log("本机 CarPlay 实验设置：传输类型 \(transport)，0x1D01 仅 Wi-Fi 声明=\(localWifiOnlySwitch.isOn ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(localSkipWifiSwitch.isOn ? "是" : "否")，0x4301 目标=127.0.0.1=\(loopback ? "是" : "否")，0x4301 标识回填 0x4300=\(localMatch4300Switch.isOn ? "是" : "否")，ACC 自证=\(localAccSelfAuthSwitch.isOn ? "开" : "关")，端点 iAP2_Initialized 自填=\(localEndpointInitSwitch.isOn ? "开" : "关")，属性回调注册=\(localPropertyHandlersSwitch.isOn ? "开" : "关")，显式发布连接=\(localExplicitPublishSwitch.isOn ? "是" : "否")，0x4302 探测=\(localStopSessionSwitch.isOn ? "开" : "关")；下一次启动本机 CarPlay 生效")
+        log("本机 CarPlay 实验设置：传输类型 \(transport)，0x1D01 仅 Wi-Fi 声明=\(localWifiOnlySwitch.isOn ? "是" : "否")，0x4301 跳过 Wi-Fi 凭据=\(localSkipWifiSwitch.isOn ? "是" : "否")，0x4301 目标=127.0.0.1=\(loopback ? "是" : "否")，0x4301 标识回填 0x4300=\(localMatch4300Switch.isOn ? "是" : "否")，ACC 自证=\(localAccSelfAuthSwitch.isOn ? "开" : "关")，端点 iAP2_Initialized 自填=\(localEndpointInitSwitch.isOn ? "开" : "关")，属性回调注册=\(localPropertyHandlersSwitch.isOn ? "开" : "关")，显式发布连接=\(localExplicitPublishSwitch.isOn ? "是" : "否")，0x4302 探测=\(localStopSessionSwitch.isOn ? "开" : "关")，连接类型扫描=\(localSweepTypesSwitch.isOn ? "开" : "关")，连接 iAP2_Initialized 自填=\(localConnInitSwitch.isOn ? "开" : "关")；下一次启动本机 CarPlay 生效")
     }
     @objc private func appearanceChanged() {
         UserDefaults.standard.set(appearanceControl.selectedSegmentIndex, forKey: "carPlayAppearance")
@@ -2157,6 +2163,10 @@ extension ReceiverViewController {
         localExplicitPublishSwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
         localStopSessionSwitch.isOn = defaults.bool(forKey: "localStopSessionProbe")
         localStopSessionSwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
+        localSweepTypesSwitch.isOn = defaults.object(forKey: "localSweepTypes") as? Bool ?? true
+        localSweepTypesSwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
+        localConnInitSwitch.isOn = defaults.object(forKey: "localConnInitSelf") as? Bool ?? true
+        localConnInitSwitch.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
         localLoopbackControl.selectedSegmentIndex = defaults.bool(forKey: "localLoopbackSession") ? 1 : 0
         localLoopbackControl.addTarget(self, action: #selector(localExperimentChanged), for: .valueChanged)
         let savedOutput = defaults.object(forKey: "headUnitOutputV2") as? Int
@@ -3209,7 +3219,7 @@ extension ReceiverViewController {
     }
 
     private func experimentSections() -> [SettingsSection] {
-        var sections = [SettingsSection("iOS 15 本机 CarPlay 实验", footer: "iAP2 握手与 0x4301 在 iOS 15.6 已全部成功，但系统 CarPlay 守护进程从不回连。这些开关逐项改变配件声明与 0x4301 的组合，用来定位守护进程的判定条件；修改后下一次启动本机 CarPlay 才生效，日志会记录实际组合。传输类型 3 对应 0x4300 里声明的值，8 为旧实验，失败都会自动回退 2。0x4301 标识回填：参数 3 改用 0x4300 里系统生成的标识（优先 MAC 样式）。ACC 自证：iAP2 认证通过后尝试把 CoreAccessories 的连接级认证标志置为已认证。端点 iAP2_Initialized 自填：配件识别被接受后向端点属性写入该键，看系统接受、拒绝还是忽略。属性变更回调注册：为若干 CarPlay 相关属性键注册 setHandler 回调，与委托是两条独立路径。显式 publish 连接：端点创建前单独发布连接。0x4302 StopSession 探测：0x4301 发出 7 秒后发一次停止请求，系统若有应答说明会话层存在。每次本机 CarPlay 启动还会：安装 ACC 委托探针并快照连接状态/属性/签名、尝试 kickstart carplayd、自测回连端口、抓包 70 秒、OSLogStore（本进程域，iOS 公开 API 读不到系统日志）与命令行双通道记录日志 60 秒、XPC 探测候选守护进程、12 秒后扫描崩溃报告/偏好/launchctl/进程表/关键路径、launchd 任务清单、CarPlay 框架清单、候选二进制里的 4301/CarPlay 字符串、CoreAccessories 导出类与运行时转储、plist 里全部配件相关 MachServices（命中即真实连接握手）、内核进程表（libproc，ps 命令在 iOS 不存在）、本进程 entitlements 校验、/usr/libexec 与界面插件清单、偏好目录全量 CarPlay 域、Bonjour 浏览 _carplay/_airplay/_raop 广播、同时监听 7001/7002/7100/5000/62078 捕捉系统回连。读取失败同样写入日志。", [
+        var sections = [SettingsSection("iOS 15 本机 CarPlay 实验", footer: "iAP2 握手与 0x4301 在 iOS 15.6 已全部成功，但系统 CarPlay 守护进程从不回连。这些开关逐项改变配件声明与 0x4301 的组合，用来定位守护进程的判定条件；修改后下一次启动本机 CarPlay 才生效，日志会记录实际组合。传输类型 3 对应 0x4300 里声明的值，8 为旧实验，失败都会自动回退 2。0x4301 标识回填：参数 3 改用 0x4300 里系统生成的标识（优先 MAC 样式）。ACC 自证：iAP2 认证通过后尝试把 CoreAccessories 的连接级认证标志置为已认证。端点 iAP2_Initialized 自填：配件识别被接受后向端点属性写入该键，看系统接受、拒绝还是忽略。属性变更回调注册：为若干 CarPlay 相关属性键注册 setHandler 回调，与委托是两条独立路径。显式 publish 连接：端点创建前单独发布连接。0x4302 StopSession 探测：0x4301 发出 7 秒后发一次停止请求，系统若有应答说明会话层存在。每次本机 CarPlay 启动还会：安装 ACC 委托探针并快照连接状态/属性/签名、尝试 kickstart carplayd、自测回连端口、抓包 70 秒、OSLogStore（本进程域，iOS 公开 API 读不到系统日志）与命令行双通道记录日志 60 秒、XPC 探测候选守护进程、12 秒后扫描崩溃报告/偏好/launchctl/进程表/关键路径、launchd 任务清单、CarPlay 框架清单、候选二进制里的 4301/CarPlay 字符串、CoreAccessories 导出类与运行时转储、plist 里全部配件相关 MachServices（命中即真实连接握手）、内核进程表（libproc，ps 命令在 iOS 不存在）、本进程 entitlements 校验、/usr/libexec 与界面插件清单、偏好目录全量 CarPlay 域、Bonjour 浏览 _carplay/_airplay/_raop 广播、同时监听 7001/7002/7100/5000/62078 捕捉系统回连；task_for_pid 枚举 iapd/backboardd/SpringBoard 已加载的镜像、共享缓存里 CarPlay 框架是否存在、内核 TCP 套接字表原始快照、7000/49152/53000 等端口占用探测、配件 Keychain 组、iapd/carkit/AccessorySettings 偏好域。连接类型 0–5 扫描会创建并销毁临时连接，映射这份 CoreAccessories 接受哪些连接类型；连接 iAP2_Initialized 自填在认证通过后向连接级属性写入。读取失败同样写入日志。", [
             .control("本机传输类型", icon: ("cable.connector", .systemIndigo), localTransportControl),
             .control("0x1D01 仅声明 Wi-Fi 传输", icon: ("wifi", .systemBlue), localWifiOnlySwitch),
             .control("0x4301 跳过 Wi-Fi 凭据", icon: ("key.slash", .systemOrange), localSkipWifiSwitch),
@@ -3219,6 +3229,8 @@ extension ReceiverViewController {
             .control("属性变更回调注册", icon: ("bell.badge", .systemYellow), localPropertyHandlersSwitch),
             .control("显式 publish 连接", icon: ("megaphone", .systemRed), localExplicitPublishSwitch),
             .control("0x4302 StopSession 探测", icon: ("stop.circle", .systemGray), localStopSessionSwitch),
+            .control("连接类型 0–5 扫描", icon: ("list.number", .systemCyan), localSweepTypesSwitch),
+            .control("连接 iAP2_Initialized 自填", icon: ("link.badge.plus", .systemPink), localConnInitSwitch),
             .control("0x4301 目标地址", icon: ("arrow.triangle.2.circlepath", .systemPurple), localLoopbackControl),
             .action("扫描系统诊断（崩溃报告 / 偏好 / 日志）", icon: ("stethoscope", .systemTeal)) { [unowned self] in
                 SystemDiagnostics.shared.scan(reason: "手动扫描")

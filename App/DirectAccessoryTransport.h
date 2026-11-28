@@ -43,5 +43,19 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)processDetailFor:(NSArray<NSString *> *)needles;
 /// This process's own entitlements via SecTask, to confirm no-sandbox took effect.
 + (NSString *)ownEntitlements;
+/// task_for_pid + remote dyld image walk: whether a running process (iapd,
+/// backboardd, SpringBoard) actually loads CarPlay-ish code on this iOS build.
++ (NSString *)remoteImageListForProcessNames:(NSArray<NSString *> *)names;
+/// _dyld_shared_cache_contains_path for each candidate framework path: is the
+/// code even present in the OS image, independent of whether anything runs it.
++ (NSString *)sharedCacheContainment;
+/// Raw net.inet.tcp.pcblist snapshot: record count plus leading raw bytes,
+/// because socket structs differ per OS version and hex can be decoded offline.
++ (NSString *)tcpSocketTableSummary;
+/// Keychain items in the accessory-related access groups (attributes only).
++ (NSString *)keychainSummary;
+/// Create and destroy connections with types 0–5 to map which types this
+/// CoreAccessories build accepts; the accepted type decides how sessions see us.
+- (void)sweepConnectionTypes;
 @end
 NS_ASSUME_NONNULL_END
