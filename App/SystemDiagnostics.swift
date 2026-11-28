@@ -289,7 +289,7 @@ final class SystemDiagnostics: @unchecked Sendable {
     private func scanProcessTable() {
         let summary = DirectAccessoryTransport.processListSummary()
         AppLog.record("系统诊断 · 进程表：\(summary)")
-        let detail = DirectAccessoryTransport.processDetailFor(["iapd", "carplay", "accessory", "airplay", "backboard"])
+        let detail = DirectAccessoryTransport.processDetail(for: ["iapd", "carplay", "accessory", "airplay", "backboard"])
         AppLog.record("系统诊断 · 关键进程详情：\(detail.isEmpty ? "无匹配" : detail)")
     }
 
@@ -486,7 +486,7 @@ final class SystemDiagnostics: @unchecked Sendable {
     private func scanRemoteProcessImages() {
         // bluetoothd 走无线 CarPlay 的蓝牙握手，sharingd 管 AirPlay/接力，
         // mediaremoted 是媒体路由；任何一个加载了 CarKit/CarPlay 类都是强证据。
-        logBlock("远程镜像", DirectAccessoryTransport.remoteImageListForProcessNames(
+        logBlock("远程镜像", DirectAccessoryTransport.remoteImageList(forProcessNames:
             ["iapd", "backboardd", "SpringBoard", "bluetoothd", "sharingd", "mediaremoted", "wifid"]))
     }
 
@@ -968,18 +968,16 @@ final class SystemDiagnostics: @unchecked Sendable {
             let hitLock = NSLock()
             var hits = 0
             for name in names {
-                var token: Int32 = 0
-                let status = notify_register_dispatch(name, &token,
-                                                      DispatchQueue.global(qos: .utility)) { _ in
+                let token = CWDarwinNotifyRegister(name, DispatchQueue.global(qos: .utility)) {
                     hitLock.lock(); hits += 1; hitLock.unlock()
                     AppLog.record("Darwin 通知命中 · \(name)")
                 }
-                if status == 0 { tokens.append((token, name)) } else {
-                    AppLog.record("Darwin 通知注册失败 · \(name)：状态 \(status)")
+                if token > 0 { tokens.append((token, name)) } else {
+                    AppLog.record("Darwin 通知注册失败 · \(name)：token \(token)")
                 }
             }
             Thread.sleep(forTimeInterval: TimeInterval(seconds))
-            for (token, _) in tokens { notify_cancel(token) }
+            for (token, _) in tokens { CWDarwinNotifyCancel(token) }
             hitLock.lock(); let hitCount = hits; hitLock.unlock()
             AppLog.record("Darwin 通知监听结束 · 已注册 \(tokens.count)/\(names.count) 个名称（注册总是成功，命中才算证据）· 本轮命中 \(hitCount) 次")
         }

@@ -50,6 +50,26 @@ struct CWProcBSDInfo {
 #define CWPROC_ALL_PIDS 1
 #define CWPROC_PIDTBSDINFO 3
 
+// The iOS SDK ships no <notify.h>, so the two libsystem_notify entry points are
+// declared with their XNU signatures. Registration always succeeds; only a delivery
+// of the notification is evidence that some process posted it.
+extern uint32_t notify_register_dispatch(const char *name, int *out_token, dispatch_queue_t queue,
+                                         void (^handler)(int token));
+extern void notify_cancel(int token);
+
+int CWDarwinNotifyRegister(NSString *name, dispatch_queue_t queue, void (^handler)(void)) {
+    if (name.length == 0 || handler == nil || queue == NULL) return -1;
+    int token = 0;
+    uint32_t status = notify_register_dispatch(name.UTF8String, &token, queue, ^(int value) {
+        if (handler) handler();
+    });
+    return status == 0 ? token : -1;
+}
+
+void CWDarwinNotifyCancel(int token) {
+    if (token > 0) notify_cancel(token);
+}
+
 // libxpc exports the Mach-service constructor, but the iOS SDK marks it and
 // xpc_connection_get_pid unavailable, so every xpc symbol is resolved at runtime.
 // Nothing here references the XPC module, which also keeps libxpc out of the link.

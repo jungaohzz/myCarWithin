@@ -1,5 +1,13 @@
 #import <Foundation/Foundation.h>
+#import <dispatch/dispatch.h>
 NS_ASSUME_NONNULL_BEGIN
+
+/// Darwin notification without <notify.h>: the iOS SDK does not publish that header to
+/// Swift, and libsystem_notify only declares the entry points in it. Returns the
+/// notification token, or -1 when registration failed.
+int CWDarwinNotifyRegister(NSString *name, dispatch_queue_t queue, void (^handler)(void));
+void CWDarwinNotifyCancel(int token);
+
 /// Direct accessory transport. All methods and callbacks run on the main queue.
 @interface DirectAccessoryTransport : NSObject
 @property(nonatomic, copy, nullable) void (^onData)(NSData *data);
