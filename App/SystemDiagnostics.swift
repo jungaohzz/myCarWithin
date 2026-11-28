@@ -837,7 +837,7 @@ final class SystemDiagnostics: @unchecked Sendable {
 
     // MARK: 原始 mDNS 查询（不依赖 NSNetService）
 
-    /// 手写 PTR 查询打到 224.0.0.251:5353 并监听应答。NSNetServiceBrowser 走的是同一个
+    /// 手写 PTR 查询打到 224.0.0.251:5353 并监听应答。NetServiceBrowser 走的是同一个
     /// mDNSResponder，但这里直接看线上有没有响应方：完全没有应答说明系统连 mDNS 侧
     /// 的 CarPlay 发现都没有发布。
     func mdnsQuery(names: [String], seconds: Int, completion: (() -> Void)? = nil) {
@@ -1060,7 +1060,7 @@ final class SystemDiagnostics: @unchecked Sendable {
     /// 无线 CarPlay 的发现走 Bonjour：如果系统里有任何会话组件在广播
     /// _carplay/_airplay/_raop 服务，浏览这里就能看到；全空则说明根本没有。
     func browseCarPlayServices(seconds: Int, completion: (() -> Void)? = nil) {
-        // NSNetServiceBrowser 依赖 run loop，必须在主线程启动。
+        // NetServiceBrowser 依赖 run loop，必须在主线程启动。
         DispatchQueue.main.async { [self] in
             let probe = BonjourBrowseProbe()
             bonjourProbe = probe
@@ -1226,17 +1226,17 @@ final class BluetoothStateProbe: NSObject, CBCentralManagerDelegate {
     }
 }
 
-/// NSNetServiceBrowser 需要 Objective-C 运行时承担 delegate 回调；
+/// NetServiceBrowser 需要 Objective-C 运行时承担 delegate 回调；
 /// 结果全部写进日志，不依赖任何系统进程配合。
-final class BonjourBrowseProbe: NSObject, NSNetServiceBrowserDelegate, NSNetServiceDelegate {
-    private var browsers: [NSNetServiceBrowser] = []
-    private var services: [NSNetService] = []
+final class BonjourBrowseProbe: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
+    private var browsers: [NetServiceBrowser] = []
+    private var services: [NetService] = []
     private var seen: Set<String> = []
 
     func start(types: [String], seconds: Int, completion: (() -> Void)? = nil) {
         AppLog.record("Bonjour 浏览开始 · \(seconds) 秒 · 类型 \(types.joined(separator: "，"))")
         for type in types {
-            let browser = NSNetServiceBrowser()
+            let browser = NetServiceBrowser()
             browser.delegate = self
             browser.searchForServices(ofType: type, inDomain: "local.")
             browsers.append(browser)
@@ -1252,7 +1252,7 @@ final class BonjourBrowseProbe: NSObject, NSNetServiceBrowserDelegate, NSNetServ
         }
     }
 
-    func netServiceBrowser(_ browser: NSNetServiceBrowser, didFind service: NSNetService, moreComing: Bool) {
+    func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
         let key = "\(service.type)|\(service.name)"
         guard !seen.contains(key) else { return }
         seen.insert(key)
@@ -1262,15 +1262,15 @@ final class BonjourBrowseProbe: NSObject, NSNetServiceBrowserDelegate, NSNetServ
         service.resolve(withTimeout: 2)
     }
 
-    func netServiceBrowser(_ browser: NSNetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
+    func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
         AppLog.record("Bonjour 浏览失败 · \(errorDict)")
     }
 
-    func netServiceDidResolveAddress(_ sender: NSNetService) {
+    func netServiceDidResolveAddress(_ sender: NetService) {
         AppLog.record("Bonjour 解析 · \(sender.type) \(sender.name) → \(sender.hostName ?? "?"):\(sender.port)")
     }
 
-    func netService(_ sender: NSNetService, didNotResolve errorDict: [String: NSNumber]) {
+    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
         AppLog.record("Bonjour 解析失败 · \(sender.type) \(sender.name)：\(errorDict)")
     }
 }
