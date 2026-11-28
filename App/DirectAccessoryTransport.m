@@ -5,9 +5,7 @@
 #import <malloc/malloc.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
-#import <xpc/xpc.h>
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
 #import <Security/Security.h>
 #import <stdlib.h>
 #import <string.h>
@@ -51,6 +49,53 @@ struct CWProcBSDInfo {
 };
 #define CWPROC_ALL_PIDS 1
 #define CWPROC_PIDTBSDINFO 3
+
+// libxpc exports the Mach-service constructor, but the iOS SDK marks it and
+// xpc_connection_get_pid unavailable, so every xpc symbol is resolved at runtime.
+// Nothing here references the XPC module, which also keeps libxpc out of the link.
+typedef void *CWXPCConnection;
+typedef void *CWXPCObject;
+typedef void *CWXPCType;
+
+static CWXPCConnection (*CWXPCCreateMachService)(const char *, dispatch_queue_t, uint64_t);
+static void (*CWXPCSetEventHandler)(CWXPCConnection, void (^)(CWXPCObject));
+static void (*CWXPCResume)(CWXPCConnection);
+static void (*CWXPCCancel)(CWXPCConnection);
+static int (*CWXPCGetPID)(CWXPCConnection);
+static CWXPCType (*CWXPCGetType)(CWXPCObject);
+static const char *(*CWXPCDictionaryGetString)(CWXPCObject, const char *);
+static CWXPCType CWXPCTypeError;
+static CWXPCType CWXPCTypeDictionary;
+static CWXPCObject CWXPCErrorConnectionInvalid;
+static CWXPCObject CWXPCErrorConnectionInterrupted;
+
+static BOOL CWLoadXPC(void) {
+    static dispatch_once_t onceToken;
+    static BOOL loaded = NO;
+    dispatch_once(&onceToken, ^{
+        void *handle = dlopen("/usr/lib/system/libxpc.dylib", RTLD_LAZY);
+        if (!handle) handle = dlopen("/usr/lib/libxpc.dylib", RTLD_LAZY);
+        if (!handle) return;
+        CWXPCCreateMachService = (CWXPCConnection (*)(const char *, dispatch_queue_t, uint64_t))
+            dlsym(handle, "xpc_connection_create_mach_service");
+        CWXPCSetEventHandler = (void (*)(CWXPCConnection, void (^)(CWXPCObject)))
+            dlsym(handle, "xpc_connection_set_event_handler");
+        CWXPCResume = (void (*)(CWXPCConnection))dlsym(handle, "xpc_connection_resume");
+        CWXPCCancel = (void (*)(CWXPCConnection))dlsym(handle, "xpc_connection_cancel");
+        CWXPCGetPID = (int (*)(CWXPCConnection))dlsym(handle, "xpc_connection_get_pid");
+        CWXPCGetType = (CWXPCType (*)(CWXPCObject))dlsym(handle, "xpc_get_type");
+        CWXPCDictionaryGetString = (const char *(*)(CWXPCObject, const char *))
+            dlsym(handle, "xpc_dictionary_get_string");
+        CWXPCTypeError = dlsym(handle, "_xpc_type_error");
+        CWXPCTypeDictionary = dlsym(handle, "_xpc_type_dictionary");
+        CWXPCErrorConnectionInvalid = dlsym(handle, "_xpc_error_connection_invalid");
+        CWXPCErrorConnectionInterrupted = dlsym(handle, "_xpc_error_connection_interrupted");
+        loaded = CWXPCCreateMachService && CWXPCSetEventHandler && CWXPCResume && CWXPCCancel
+            && CWXPCGetPID && CWXPCGetType && CWXPCDictionaryGetString && CWXPCTypeError
+            && CWXPCTypeDictionary && CWXPCErrorConnectionInvalid && CWXPCErrorConnectionInterrupted;
+    });
+    return loaded;
+}
 
 /// Delegate callbacks we explicitly implement. Parameters are declared as `void *` on purpose:
 /// the caller retains object arguments for the duration of the call, while integer arguments
@@ -293,9 +338,11 @@ static NSString *ReadRemoteString(mach_port_t task, uint64_t address, size_t lim
     if (address == 0 || limit == 0) return nil;
     char *buffer = calloc(1, limit + 1);
     if (!buffer) return nil;
-    mach_vm_size_t outsize = 0;
-    kern_return_t kr = mach_vm_read_overwrite(task, (mach_vm_address_t)address,
-        (mach_vm_size_t)limit, (mach_vm_address_t)(uintptr_t)buffer, &outsize);
+    // The iOS SDK ships only <mach/vm_map.h>; on arm64 vm_address_t/vm_size_t are
+    // 64-bit, so vm_read_overwrite has the same semantics as mach_vm_read_overwrite.
+    vm_size_t outsize = 0;
+    kern_return_t kr = vm_read_overwrite(task, (vm_address_t)address,
+        (vm_size_t)limit, (vm_address_t)(uintptr_t)buffer, &outsize);
     NSString *result = nil;
     if (kr == KERN_SUCCESS && outsize > 0) {
         buffer[limit] = 0;
@@ -332,10 +379,10 @@ static NSString *ReadRemoteString(mach_port_t task, uint64_t address, size_t lim
             }
             uint64_t arrayAddress = (uint64_t)dyldInfo.all_image_info_addr;
             uint8_t head[32] = {0};
-            mach_vm_size_t got = 0;
+            vm_size_t got = 0;
             if (arrayAddress == 0
-                || mach_vm_read_overwrite(task, arrayAddress, sizeof(head),
-                                          (mach_vm_address_t)(uintptr_t)head, &got) != KERN_SUCCESS
+                || vm_read_overwrite(task, (vm_address_t)arrayAddress, (vm_size_t)sizeof(head),
+                                     (vm_address_t)(uintptr_t)head, &got) != KERN_SUCCESS
                 || got < 16) {
                 [out appendFormat:@"%@(pid %d)：读取 dyld 头部失败；", needle, (int)pid];
                 mach_port_deallocate(mach_task_self(), task);
@@ -350,8 +397,8 @@ static NSString *ReadRemoteString(mach_port_t task, uint64_t address, size_t lim
             uint8_t *table = malloc(tableBytes);
             NSMutableArray<NSString *> *matched = [NSMutableArray array];
             BOOL readOK = table && infoArray != 0
-                && mach_vm_read_overwrite(task, infoArray, (mach_vm_size_t)tableBytes,
-                                          (mach_vm_address_t)(uintptr_t)table, &got) == KERN_SUCCESS;
+                && vm_read_overwrite(task, (vm_address_t)infoArray, (vm_size_t)tableBytes,
+                                     (vm_address_t)(uintptr_t)table, &got) == KERN_SUCCESS;
             if (readOK) {
                 for (uint32_t i = 0; i < imageCount; i++) {
                     uint64_t pathAddress = 0;
@@ -417,7 +464,7 @@ static NSString *ReadRemoteString(mach_port_t task, uint64_t address, size_t lim
             void *handle = dlopen(path.UTF8String, RTLD_LAZY);
             if (!handle) {
                 const char *reason = dlerror();
-                [out appendFormat:@"%@：dlopen 失败（%s）；", path.lastPathComponent, reason ? reason : @"?"];
+                [out appendFormat:@"%@：dlopen 失败（%s）；", path.lastPathComponent, reason ? reason : "?"];
                 continue;
             }
             unsigned int classCount = 0;
@@ -610,31 +657,35 @@ static NSString *ReadRemoteString(mach_port_t task, uint64_t address, size_t lim
 }
 + (void)xpcProbe:(NSString *)service log:(void (^)(NSString *))log {
     if (service.length == 0 || !log) return;
-    xpc_connection_t connection = xpc_connection_create_mach_service(service.UTF8String, NULL, 0);
+    if (!CWLoadXPC()) {
+        log([NSString stringWithFormat:@"XPC 连接 · %@：libxpc 符号不可用，跳过", service]);
+        return;
+    }
+    CWXPCConnection connection = CWXPCCreateMachService(service.UTF8String, NULL, 0);
     if (!connection) {
         log([NSString stringWithFormat:@"XPC 连接 · %@：创建失败", service]);
         return;
     }
-    xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
-        if (event == XPC_ERROR_CONNECTION_INVALID) {
+    CWXPCSetEventHandler(connection, ^(CWXPCObject event) {
+        if (event == CWXPCErrorConnectionInvalid) {
             log([NSString stringWithFormat:@"XPC 连接 · %@：连接无效（服务拒绝或不存在）", service]);
-        } else if (event == XPC_ERROR_CONNECTION_INTERRUPTED) {
+        } else if (event == CWXPCErrorConnectionInterrupted) {
             log([NSString stringWithFormat:@"XPC 连接 · %@：连接中断", service]);
-        } else if (xpc_get_type(event) == XPC_TYPE_ERROR) {
-            const char *text = xpc_dictionary_get_string(event, XPC_ERROR_KEY_DESCRIPTION);
-            log([NSString stringWithFormat:@"XPC 连接 · %@：错误事件 %s", service, text ?: "未知"]);
-        } else if (xpc_get_type(event) == XPC_TYPE_DICTIONARY) {
+        } else if (CWXPCGetType(event) == CWXPCTypeError) {
+            const char *text = CWXPCDictionaryGetString(event, "XPCErrorDescription");
+            log([NSString stringWithFormat:@"XPC 连接 · %@：错误事件 %s", service, text ? text : "未知"]);
+        } else if (CWXPCGetType(event) == CWXPCTypeDictionary) {
             log([NSString stringWithFormat:@"XPC 连接 · %@：收到字典回复（对端接受了空客户端）", service]);
         } else {
             log([NSString stringWithFormat:@"XPC 连接 · %@：收到非字典事件", service]);
         }
     });
-    xpc_connection_resume(connection);
+    CWXPCResume(connection);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                    dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        pid_t pid = xpc_connection_get_pid(connection);
-        log([NSString stringWithFormat:@"XPC 连接 · %@：1.5 秒后对端 pid=%d", service, (int)pid]);
-        xpc_connection_cancel(connection);
+        int pid = CWXPCGetPID(connection);
+        log([NSString stringWithFormat:@"XPC 连接 · %@：1.5 秒后对端 pid=%d", service, pid]);
+        CWXPCCancel(connection);
     });
 }
 - (void)reportDiag:(NSString *)text {
