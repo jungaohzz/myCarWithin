@@ -1715,7 +1715,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 // 抓包 + 日志流 + Darwin 通知 + 原始 mDNS + 蓝牙状态 + 12 秒全量扫描；
                 // 每项在自己的真实收口点回调，进度不是时间估算。
                 let diagnostics = SystemDiagnostics.shared
-                diagnostics.beginRound(total: 12) { [weak self] done, total in
+                let roundID = diagnostics.beginRound(total: 12) { [weak self] done, total in
                     guard let self, self.localDiagnosticsID == startupID else { return }
                     self.localDiagnosticsDone = done
                     self.localDiagnosticsTotal = total
@@ -1727,23 +1727,31 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                         self.renderLocalProgress()
                     }
                 }
-                diagnostics.kickstartCarPlayDaemon { diagnostics.advanceRound() }
-                diagnostics.probeCarPlayXPC { diagnostics.advanceRound() }
-                diagnostics.selfConnectTest(port: port) { diagnostics.advanceRound() }
+                diagnostics.kickstartCarPlayDaemon { diagnostics.advanceRound(roundID) }
+                diagnostics.probeCarPlayXPC { diagnostics.advanceRound(roundID) }
+                diagnostics.selfConnectTest(port: port) { diagnostics.advanceRound(roundID) }
                 diagnostics.listenProbePorts([7001, 7002, 7100, 5000, 62078], seconds: 70) {
-                    diagnostics.advanceRound()
+                    diagnostics.advanceRound(roundID)
                 }
-                diagnostics.browseCarPlayServices(seconds: 25) { diagnostics.advanceRound() }
+                diagnostics.browseCarPlayServices(seconds: 25) { diagnostics.advanceRound(roundID) }
                 let loopback = UserDefaults.standard.bool(forKey: "localLoopbackSession")
                 diagnostics.captureNetwork(interface: loopback ? "lo0" : "en0", seconds: 70) {
-                    diagnostics.advanceRound()
+                    diagnostics.advanceRound(roundID)
                 }
-                diagnostics.streamLogs(seconds: 60) { diagnostics.advanceRound() }
-                diagnostics.listenDarwinNotifications(seconds: 70) { diagnostics.advanceRound() }
-                diagnostics.udpProbe { diagnostics.advanceRound() }
+                diagnostics.streamLogs(seconds: 60) { diagnostics.advanceRound(roundID) }
+                diagnostics.listenDarwinNotifications(seconds: 70) { diagnostics.advanceRound(roundID) }
+                diagnostics.udpProbe { diagnostics.advanceRound(roundID) }
                 diagnostics.mdnsQuery(names: ["_carplay._tcp.local", "_airplay._tcp.local", "_raop._tcp.local"],
-                                      seconds: 5) { diagnostics.advanceRound() }
-                diagnostics.bluetoothState(seconds: 3) { diagnostics.advanceRound() }
+                                      seconds: 5) { diagnostics.advanceRound(roundID) }
+                diagnostics.bluetoothState(seconds: 3) { diagnostics.advanceRound(roundID) }
+                // 系统诊断扫描：12 秒后崩溃报告已生成，App 看不到守护进程的判断，只能读系统证据。
+                // 会话失败也会走到这里：诊断扫描与连接状态无关，照样要拿证据。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
+                    guard let self, self.localDiagnosticsID == startupID else { return }
+                    SystemDiagnostics.shared.scan(reason: "本机 CarPlay 启动后 12 秒") {
+                        SystemDiagnostics.shared.advanceRound(roundID)
+                    }
+                }
                 // 兜底：正常最长链路约 70 秒（并发队列下各窗口重叠，日志流与抓包并行），
                 // 任何一项回调丢失时 160 秒强制收口并说明，避免界面永远停在等待。
                 DispatchQueue.main.asyncAfter(deadline: .now() + 160) { [weak self] in
@@ -1755,14 +1763,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             prepareExternalOutput(configuration: config)
             receiver.start(configuration: config, identity: identity, preferredViewer: primaryViewer)
             watchStartupAddress(address)
-            // 系统诊断扫描：12 秒后崩溃报告已生成，App 看不到守护进程的判断，只能读系统证据。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
-                // 会话失败也会走到这里：诊断扫描与连接状态无关，照样要拿证据。
-                guard let self, self.localDiagnosticsID == startupID else { return }
-                SystemDiagnostics.shared.scan(reason: "本机 CarPlay 启动后 12 秒") {
-                    SystemDiagnostics.shared.advanceRound()
-                }
-            }
             return
         }
         guard let identity else { return }

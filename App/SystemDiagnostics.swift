@@ -21,34 +21,41 @@ final class SystemDiagnostics: @unchecked Sendable {
 
     // MARK: 本轮诊断进度（真实完成数 / 任务总数）
 
+    private var roundID: UUID?
     private var roundTotal = 0
     private var roundDone = 0
     private var roundHandler: ((Int, Int) -> Void)?
     private let roundLock = NSLock()
 
-    /// 登记本机 CarPlay 启动后这一轮的采集任务总数，每项收口时调 advanceRound。
+    /// 登记本机 CarPlay 启动后这一轮的采集任务总数，每项收口时调 advanceRound(本轮 ID)。
     /// 进度来自真实回调而非时间估算：抓包/监听窗口结束、扫描跑完才计一项。
-    func beginRound(total: Int, onProgress: @escaping (_ done: Int, _ total: Int) -> Void) {
+    @discardableResult
+    func beginRound(total: Int, onProgress: @escaping (_ done: Int, _ total: Int) -> Void) -> UUID {
         let count = max(total, 1)
+        let id = UUID()
         roundLock.lock()
+        roundID = id
         roundTotal = count
         roundDone = 0
         roundHandler = onProgress
         roundLock.unlock()
         onProgress(0, count)
+        return id
     }
 
     func cancelRound() {
         roundLock.lock()
+        roundID = nil
         roundTotal = 0
         roundDone = 0
         roundHandler = nil
         roundLock.unlock()
     }
 
-    func advanceRound() {
+    /// 只认本轮 ID：上一轮迟到的回调（如 70 秒窗口晚到几秒）不能推进新一轮。
+    func advanceRound(_ id: UUID) {
         roundLock.lock()
-        guard roundTotal > 0 else { roundLock.unlock(); return }
+        guard roundTotal > 0, roundID == id else { roundLock.unlock(); return }
         roundDone += 1
         let done = min(roundDone, roundTotal)
         let total = roundTotal
@@ -793,7 +800,9 @@ final class SystemDiagnostics: @unchecked Sendable {
         captureQueue.async { [self] in
             defer { completion?() }
             logBlock("UDP 套接字表", DirectAccessoryTransport.udpSocketTableSummary())
-            for port: UInt16 in [5353, 62078, 7000, 7100, 49152, 3689] {
+            // 5353 不在此探测：mdnsQuery 并发 bind 5353，两个探针互抢会让结果变成假“被独占”。
+            // 5353 的占用情况由 mdnsQuery 自己的 bind 结果给出。
+            for port: UInt16 in [62078, 7000, 7100, 49152, 3689] {
                 let fd = socket(AF_INET, SOCK_DGRAM, 0)
                 guard fd >= 0 else {
                     AppLog.record("UDP 占用 · \(port)：socket 失败 errno \(errno)")
@@ -857,12 +866,24 @@ final class SystemDiagnostics: @unchecked Sendable {
                 AppLog.record("mDNS 查询 · bind 5353 失败 errno \(errno)（mDNSResponder 独占端口，本身即证据）")
                 return
             }
+            // 组播必须显式绑接口：默认路由可能是蜂窝，查询会从错误链路出去、应答也回不来。
             var group = ip_mreq()
             group.imr_multiaddr.s_addr = inet_addr("224.0.0.251")
             group.imr_interface.s_addr = in_addr_t(INADDR_ANY)
+            var outbound = in_addr()
+            let wifi = ReceiverConfiguration.wifiIPv4Address()
+            let hasInterface = wifi.map { inet_pton(AF_INET, $0, &outbound) == 1 } ?? false
+            if hasInterface { group.imr_interface.s_addr = outbound.s_addr }
             let joined = setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &group,
                                     socklen_t(MemoryLayout<ip_mreq>.size))
-            AppLog.record("mDNS 查询 · bind 5353 成功，加入 224.0.0.251 组播\(joined == 0 ? "成功" : "失败 errno \(errno)")")
+            let bindResult = "mDNS 查询 · bind 5353 成功，224.0.0.251 组加入\(joined == 0 ? "成功" : "失败 errno \(errno)")"
+            if let wifi, hasInterface {
+                let set = setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &outbound,
+                                     socklen_t(MemoryLayout<in_addr>.size))
+                AppLog.record("\(bindResult) · 发送接口 en0 \(wifi) \(set == 0 ? "已设定" : "设定失败 errno \(errno)")")
+            } else {
+                AppLog.record("\(bindResult) · en0 无 IPv4，按默认接口发送（可能走蜂窝）")
+            }
             var target = sockaddr_in()
             target.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
             target.sin_family = sa_family_t(AF_INET)
@@ -944,10 +965,13 @@ final class SystemDiagnostics: @unchecked Sendable {
                          "com.apple.CoreAccessories.sessionStarted"]
             AppLog.record("Darwin 通知监听开始 · \(seconds) 秒 · \(names.count) 个候选名（名字为推测，命中即强证据）")
             var tokens: [(Int32, String)] = []
+            let hitLock = NSLock()
+            var hits = 0
             for name in names {
                 var token: Int32 = 0
                 let status = notify_register_dispatch(name, &token,
                                                       DispatchQueue.global(qos: .utility)) { _ in
+                    hitLock.lock(); hits += 1; hitLock.unlock()
                     AppLog.record("Darwin 通知命中 · \(name)")
                 }
                 if status == 0 { tokens.append((token, name)) } else {
@@ -956,7 +980,8 @@ final class SystemDiagnostics: @unchecked Sendable {
             }
             Thread.sleep(forTimeInterval: TimeInterval(seconds))
             for (token, _) in tokens { notify_cancel(token) }
-            AppLog.record("Darwin 通知监听结束 · 注册成功 \(tokens.count)/\(names.count) 个名称，期间命中见上一行")
+            hitLock.lock(); let hitCount = hits; hitLock.unlock()
+            AppLog.record("Darwin 通知监听结束 · 已注册 \(tokens.count)/\(names.count) 个名称（注册总是成功，命中才算证据）· 本轮命中 \(hitCount) 次")
         }
     }
 
