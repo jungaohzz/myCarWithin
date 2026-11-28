@@ -1,3 +1,4 @@
+import CoreBluetooth
 import Darwin
 import Foundation
 import OSLog
@@ -69,6 +70,9 @@ final class SystemDiagnostics: @unchecked Sendable {
             }
             lastScan = now
             AppLog.record("系统诊断扫描开始 · \(reason)")
+            if let version = NSDictionary(contentsOfFile: "/System/Library/CoreServices/SystemVersion.plist") as? [String: Any] {
+                AppLog.record("系统诊断 · 系统版本 \(version["ProductVersion"] ?? "?")（构建 \(version["ProductBuildVersion"] ?? "?")）")
+            }
             scanPaths()
             scanCarPlayComponents()
             scanAllMachServices()
@@ -177,6 +181,7 @@ final class SystemDiagnostics: @unchecked Sendable {
     // MARK: 路径与崩溃报告
 
     private var bonjourProbe: BonjourBrowseProbe?
+    private var bluetoothProbe: BluetoothStateProbe?
 
     private func scanPaths() {
         let paths = ["/usr/libexec/carplayd", "/usr/sbin/carplayd", "/usr/libexec/carkitd",
@@ -472,7 +477,10 @@ final class SystemDiagnostics: @unchecked Sendable {
     /// task_for_pid + 远程 dyld 镜像枚举：正在运行的 iapd/backboardd/SpringBoard 是否
     /// 加载了 CarPlay 代码。区分“代码在系统里但没进程用”与“这些进程里根本没有”。
     private func scanRemoteProcessImages() {
-        logBlock("远程镜像", DirectAccessoryTransport.remoteImageListForProcessNames(["iapd", "backboardd", "SpringBoard"]))
+        // bluetoothd 走无线 CarPlay 的蓝牙握手，sharingd 管 AirPlay/接力，
+        // mediaremoted 是媒体路由；任何一个加载了 CarKit/CarPlay 类都是强证据。
+        logBlock("远程镜像", DirectAccessoryTransport.remoteImageListForProcessNames(
+            ["iapd", "backboardd", "SpringBoard", "bluetoothd", "sharingd", "mediaremoted", "wifid"]))
     }
 
     /// _dyld_shared_cache_contains_path：CarPlay 相关框架是否存在于系统镜像，
@@ -551,7 +559,9 @@ final class SystemDiagnostics: @unchecked Sendable {
                      "/var/mobile/Library/Preferences/com.apple.carplayd.plist",
                      "/var/mobile/Library/Preferences/com.apple.CoreAccessories.plist",
                      "/var/mobile/Library/Preferences/com.apple.iapd.plist",
-                     "/var/mobile/Library/Preferences/com.apple.AccessorySettings.plist"] {
+                     "/var/mobile/Library/Preferences/com.apple.AccessorySettings.plist",
+                     "/var/mobile/Library/Preferences/com.apple.MobileBluetooth.plist",
+                     "/var/mobile/Library/Preferences/com.apple.bluetooth.plist"] {
             let size = (try? FileManager.default.attributesOfItem(atPath: file)[.size] as? Int) ?? nil
             AppLog.record("系统诊断 · 偏好文件 \(file) \(size.map { "\($0) 字节" } ?? "不存在或不可读")")
         }
@@ -772,6 +782,147 @@ final class SystemDiagnostics: @unchecked Sendable {
             AppLog.record("网络抓包开始 · \(interface) · 约 \(seconds) 秒 · 过滤 \(filter)")
             run(command: "tcpdump -n -i \(interface) -c 120 \"\(filter)\" 2>&1 & TP=$!; sleep \(seconds); kill -TERM $TP 2>/dev/null",
                 maxSeconds: Double(seconds) + 6, maxLines: 120, tag: "抓包 \(interface)")
+        }
+    }
+
+    // MARK: UDP 套接字探针（监听表 + 端口占用）
+
+    /// mDNS 发现与 AirPlay 媒体都走 UDP；TCP 表看不到 UDP 监听器。
+    /// 这里既抓内核 UDP 表原始快照，也对常用 UDP 端口做 bind 占用探测。
+    func udpProbe(completion: (() -> Void)? = nil) {
+        captureQueue.async { [self] in
+            defer { completion?() }
+            logBlock("UDP 套接字表", DirectAccessoryTransport.udpSocketTableSummary())
+            for port: UInt16 in [5353, 62078, 7000, 7100, 49152, 3689] {
+                let fd = socket(AF_INET, SOCK_DGRAM, 0)
+                guard fd >= 0 else {
+                    AppLog.record("UDP 占用 · \(port)：socket 失败 errno \(errno)")
+                    continue
+                }
+                var reuse: Int32 = 1
+                _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+                var address = sockaddr_in()
+                address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+                address.sin_family = sa_family_t(AF_INET)
+                address.sin_port = port.bigEndian
+                address.sin_addr.s_addr = in_addr_t(INADDR_ANY)
+                let bound = withUnsafePointer(to: &address) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+                if bound == 0 {
+                    AppLog.record("UDP 占用 · \(port)：空闲（没有进程独占监听）")
+                    let reused = setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &reuse, socklen_t(MemoryLayout<Int32>.size))
+                    if reused == 0 {
+                        AppLog.record("UDP 占用 · \(port)：SO_REUSEPORT 可用（5353 可与其他 mDNS 响应器共享）")
+                    }
+                } else {
+                    let code = errno
+                    AppLog.record("UDP 占用 · \(port)：bind 失败 errno \(code)（\(code == EADDRINUSE ? "被独占" : "非占用")）")
+                }
+                close(fd)
+            }
+        }
+    }
+
+    // MARK: 原始 mDNS 查询（不依赖 NSNetService）
+
+    /// 手写 PTR 查询打到 224.0.0.251:5353 并监听应答。NSNetServiceBrowser 走的是同一个
+    /// mDNSResponder，但这里直接看线上有没有响应方：完全没有应答说明系统连 mDNS 侧
+    /// 的 CarPlay 发现都没有发布。
+    func mdnsQuery(names: [String], seconds: Int, completion: (() -> Void)? = nil) {
+        captureQueue.async { [self] in
+            defer { completion?() }
+            let fd = socket(AF_INET, SOCK_DGRAM, 0)
+            guard fd >= 0 else {
+                AppLog.record("mDNS 查询 · socket 失败 errno \(errno)")
+                return
+            }
+            defer { close(fd) }
+            var reuse: Int32 = 1
+            _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+            _ = setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &reuse, socklen_t(MemoryLayout<Int32>.size))
+            var local = sockaddr_in()
+            local.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            local.sin_family = sa_family_t(AF_INET)
+            local.sin_port = UInt16(5353).bigEndian
+            local.sin_addr.s_addr = in_addr_t(INADDR_ANY)
+            let bound = withUnsafePointer(to: &local) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            guard bound == 0 else {
+                AppLog.record("mDNS 查询 · bind 5353 失败 errno \(errno)（mDNSResponder 独占端口，本身即证据）")
+                return
+            }
+            var group = ip_mreq()
+            group.imr_multiaddr.s_addr = inet_addr("224.0.0.251")
+            group.imr_interface.s_addr = in_addr_t(INADDR_ANY)
+            let joined = setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &group,
+                                    socklen_t(MemoryLayout<ip_mreq>.size))
+            AppLog.record("mDNS 查询 · bind 5353 成功，加入 224.0.0.251 组播\(joined == 0 ? "成功" : "失败 errno \(errno)")")
+            var target = sockaddr_in()
+            target.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            target.sin_family = sa_family_t(AF_INET)
+            target.sin_port = UInt16(5353).bigEndian
+            target.sin_addr.s_addr = inet_addr("224.0.0.251")
+            for name in names {
+                var query = Data([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+                for label in name.split(separator: ".") {
+                    query.append(UInt8(label.utf8.count))
+                    query.append(contentsOf: label.utf8)
+                }
+                query.append(0)
+                query.append(contentsOf: [0, 12, 0, 1]) // PTR IN
+                let sent = query.withUnsafeBytes { bytes in
+                    withUnsafePointer(to: &target) { pointer in
+                        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                            sendto(fd, bytes.baseAddress, bytes.count, 0, $0,
+                                   socklen_t(MemoryLayout<sockaddr_in>.size))
+                        }
+                    }
+                }
+                AppLog.record("mDNS 查询 · 已发送 \(name) PTR 查询（\(sent) 字节）")
+            }
+            let deadline = Date().addingTimeInterval(TimeInterval(seconds))
+            var received = 0
+            while Date() < deadline {
+                var buffer = [UInt8](repeating: 0, count: 1616)
+                var source = sockaddr_in()
+                var sourceLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+                let count = withUnsafeMutablePointer(to: &source) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        recvfrom(fd, &buffer, buffer.count, MSG_DONTWAIT, $0, &sourceLength)
+                    }
+                }
+                if count > 0 {
+                    received += 1
+                    var host = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                    var peer = source.sin_addr
+                    _ = inet_ntop(AF_INET, &peer, &host, socklen_t(INET_ADDRSTRLEN))
+                    let hex = buffer[0..<min(count, 64)].map { String(format: "%02x", $0) }.joined()
+                    AppLog.record("mDNS 应答 · \(received) 来自 \(String(cString: host)):\(UInt16(bigEndian: source.sin_port)) · \(count) 字节 · 开头 \(hex)")
+                } else {
+                    usleep(50_000)
+                }
+            }
+            AppLog.record("mDNS 查询结束 · \(names.count) 个查询，收到 \(received) 个应答\(received == 0 ? "（系统 mDNS 侧没有任何 CarPlay/AirPlay 应答）" : "")")
+        }
+    }
+
+    // MARK: 蓝牙状态（无线 CarPlay 的蓝牙前置条件）
+
+    /// 无线 CarPlay 先用蓝牙完成配对与信道协商；蓝牙关闭/受限/未授权都会让
+    /// 会话在到达 0x4301 之前就失败。这里只读状态、不扫描，3 秒内收口。
+    func bluetoothState(seconds: Int, completion: (() -> Void)? = nil) {
+        DispatchQueue.main.async { [self] in
+            let probe = BluetoothStateProbe()
+            bluetoothProbe = probe
+            probe.start(seconds: seconds) {
+                completion?()
+            }
         }
     }
 
@@ -1003,6 +1154,50 @@ final class SystemDiagnostics: @unchecked Sendable {
         formatter.dateFormat = "MM-dd HH:mm:ss"
         formatter.locale = Locale(identifier: "en_US_POSIX")
         return formatter.string(from: date)
+    }
+}
+
+/// 只读蓝牙状态：CBCentralManager 的 state 回调说明系统是否允许本 App 使用蓝牙。
+/// 回调在主队列（manager 在主队列创建），3 秒后销毁，不停留任何扫描。
+final class BluetoothStateProbe: NSObject, CBCentralManagerDelegate {
+    private var manager: CBCentralManager?
+    private var completion: (() -> Void)?
+    private var finished = false
+
+    func start(seconds: Int, completion: @escaping () -> Void) {
+        self.completion = completion
+        AppLog.record("蓝牙状态 · 创建 CBCentralManager（只读状态，不扫描）")
+        manager = CBCentralManager(delegate: self, queue: .main)
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds)) { [weak self] in
+            self?.finish(reason: "\(seconds) 秒到时")
+        }
+    }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        let state: String
+        switch central.state {
+        case .poweredOn: state = "poweredOn（可用）"
+        case .poweredOff: state = "poweredOff（蓝牙已关闭）"
+        case .unauthorized: state = "unauthorized（权限被拒绝）"
+        case .unsupported: state = "unsupported（此设备不支持）"
+        case .resetting: state = "resetting"
+        case .unknown: state = "unknown"
+        @unknown default: state = "未知值 \(central.state.rawValue)"
+        }
+        AppLog.record("蓝牙状态 · CBCentralManager.state = \(state)")
+        // poweredOn 后立刻结束：状态就是证据，不需要等待。
+        if central.state != .unknown && central.state != .resetting { finish(reason: "状态已确定") }
+    }
+
+    private func finish(reason: String) {
+        guard !finished else { return }
+        finished = true
+        AppLog.record("蓝牙状态 · 探针结束（\(reason)）")
+        manager?.delegate = nil
+        manager = nil
+        let handler = completion
+        completion = nil
+        handler?()
     }
 }
 

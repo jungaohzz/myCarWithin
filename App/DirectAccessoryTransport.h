@@ -57,6 +57,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Raw net.inet.tcp.pcblist snapshot: record count plus leading raw bytes,
 /// because socket structs differ per OS version and hex can be decoded offline.
 + (NSString *)tcpSocketTableSummary;
+/// Same for net.inet.udp.pcblist: mDNS/AirPlay discovery and AirPlay media are UDP,
+/// and a UDP listener is invisible to the TCP table.
++ (NSString *)udpSocketTableSummary;
 /// Keychain items in the accessory-related access groups (attributes only).
 + (NSString *)keychainSummary;
 /// Create and destroy connections with types 0–5 to map which types this

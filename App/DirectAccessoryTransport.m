@@ -468,6 +468,39 @@ static NSString *ReadRemoteString(mach_port_t task, uint64_t address, size_t lim
     return [NSString stringWithFormat:@"net.inet.tcp.pcblist %zu 字节、记录 %d 条；前 8 条原始字节：%@",
             length, records, samples];
 }
++ (NSString *)udpSocketTableSummary {
+    size_t length = 0;
+    int result = sysctlbyname("net.inet.udp.pcblist", NULL, &length, NULL, 0);
+    if (result != 0 || length == 0)
+        return [NSString stringWithFormat:@"net.inet.udp.pcblist 查询失败 errno %d（长度 %zu）", errno, length];
+    uint8_t *buffer = malloc(length);
+    if (!buffer) return @"内存不足";
+    result = sysctlbyname("net.inet.udp.pcblist", buffer, &length, NULL, 0);
+    if (result != 0) {
+        int code = errno;
+        free(buffer);
+        return [NSString stringWithFormat:@"net.inet.udp.pcblist 读取失败 errno %d", code];
+    }
+    uint32_t offset = 0;
+    int records = 0;
+    NSMutableString *samples = [NSMutableString string];
+    while (offset + 16 <= length) {
+        uint32_t recordLength = 0;
+        memcpy(&recordLength, buffer + offset, 4);
+        if (recordLength < 16 || offset + recordLength > length) break;
+        records++;
+        if (records <= 8) {
+            size_t dump = MIN((size_t)recordLength, (size_t)96);
+            [samples appendFormat:@"[%d]", records];
+            for (size_t i = 0; i < dump; i++) [samples appendFormat:@"%02x", buffer[offset + i]];
+            [samples appendString:@" "];
+        }
+        offset += recordLength;
+    }
+    free(buffer);
+    return [NSString stringWithFormat:@"net.inet.udp.pcblist %zu 字节、记录 %d 条；前 8 条原始字节：%@",
+            length, records, samples];
+}
 + (NSString *)keychainSummary {
     NSMutableString *out = [NSMutableString string];
     NSArray<NSString *> *groups = @[@"apple-isc-keychain", @"com.apple.token",
