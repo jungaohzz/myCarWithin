@@ -1711,10 +1711,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 self.sameDevice.start(configuration: live, identity: identity)
                 self.startLocalProgress(base: "正在连接 CarPlay…")
                 // 证据链：daemon 是否在跑 → 端口能不能回连 → daemon 有没有发包 → 系统日志说了什么。
-                // 8 项任务：3 个即时探测 + Bonjour + 端口监听 + 抓包 + 日志流 + 12 秒全量扫描；
+                // 9 项任务：3 个即时探测 + Bonjour + 端口监听 + 抓包 + 日志流 + Darwin 通知 + 12 秒全量扫描；
                 // 每项在自己的真实收口点回调，进度不是时间估算。
                 let diagnostics = SystemDiagnostics.shared
-                diagnostics.beginRound(total: 8) { [weak self] done, total in
+                diagnostics.beginRound(total: 9) { [weak self] done, total in
                     guard let self, self.localDiagnosticsID == startupID else { return }
                     self.localDiagnosticsDone = done
                     self.localDiagnosticsTotal = total
@@ -1738,7 +1738,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                     diagnostics.advanceRound()
                 }
                 diagnostics.streamLogs(seconds: 60) { diagnostics.advanceRound() }
-                // 兜底：正常最长链路约 70 秒（串行队列下抓包+日志流叠加也不超过 150 秒），
+                diagnostics.listenDarwinNotifications(seconds: 70) { diagnostics.advanceRound() }
+                // 兜底：正常最长链路约 70 秒（并发队列下各窗口重叠，日志流与抓包并行），
                 // 任何一项回调丢失时 160 秒强制收口并说明，避免界面永远停在等待。
                 DispatchQueue.main.asyncAfter(deadline: .now() + 160) { [weak self] in
                     guard let self, self.localDiagnosticsID == startupID else { return }
@@ -3324,7 +3325,7 @@ extension ReceiverViewController {
     }
 
     private func experimentSections() -> [SettingsSection] {
-        var sections = [SettingsSection("iOS 15 本机 CarPlay 实验", footer: "iAP2 握手与 0x4301 在 iOS 15.6 已全部成功，但系统 CarPlay 守护进程从不回连。这些开关逐项改变配件声明与 0x4301 的组合，用来定位守护进程的判定条件；修改后下一次启动本机 CarPlay 才生效，日志会记录实际组合。传输类型 3 对应 0x4300 里声明的值，8 为旧实验，失败都会自动回退 2。0x4301 标识回填：参数 3 改用 0x4300 里系统生成的标识（优先 MAC 样式）。ACC 自证：iAP2 认证通过后尝试把 CoreAccessories 的连接级认证标志置为已认证。端点 iAP2_Initialized 自填：配件识别被接受后向端点属性写入该键，看系统接受、拒绝还是忽略。属性变更回调注册：为若干 CarPlay 相关属性键注册 setHandler 回调，与委托是两条独立路径。显式 publish 连接：端点创建前单独发布连接。0x4302 StopSession 探测：0x4301 发出 7 秒后发一次停止请求，系统若有应答说明会话层存在。每次本机 CarPlay 启动还会：安装 ACC 委托探针并快照连接状态/属性/签名、尝试 kickstart carplayd、自测回连端口、抓包 70 秒、OSLogStore（本进程域，iOS 公开 API 读不到系统日志）与命令行双通道记录日志 60 秒、XPC 探测候选守护进程、12 秒后扫描崩溃报告/偏好/launchctl/进程表/关键路径、launchd 任务清单、CarPlay 框架清单、候选二进制里的 4301/CarPlay 字符串、CoreAccessories 导出类与运行时转储、plist 里全部配件相关 MachServices（命中即真实连接握手）、内核进程表（libproc，ps 命令在 iOS 不存在）、本进程 entitlements 校验、/usr/libexec 与界面插件清单、偏好目录全量 CarPlay 域、Bonjour 浏览 _carplay/_airplay/_raop 广播、同时监听 7001/7002/7100/5000/62078 捕捉系统回连；task_for_pid 枚举 iapd/backboardd/SpringBoard 已加载的镜像、共享缓存里 CarPlay 框架是否存在、内核 TCP 套接字表原始快照、7000/49152/53000 等端口占用探测、配件 Keychain 组、iapd/carkit/AccessorySettings 偏好域。连接类型 0–5 扫描会创建并销毁临时连接，映射这份 CoreAccessories 接受哪些连接类型；连接 iAP2_Initialized 自填在认证通过后向连接级属性写入。读取失败同样写入日志。", [
+        var sections = [SettingsSection("iOS 15 本机 CarPlay 实验", footer: "iAP2 握手与 0x4301 在 iOS 15.6 已全部成功，但系统 CarPlay 守护进程从不回连。这些开关逐项改变配件声明与 0x4301 的组合，用来定位守护进程的判定条件；修改后下一次启动本机 CarPlay 才生效，日志会记录实际组合。传输类型 3 对应 0x4300 里声明的值，8 为旧实验，失败都会自动回退 2。0x4301 标识回填：参数 3 改用 0x4300 里系统生成的标识（优先 MAC 样式）。ACC 自证：iAP2 认证通过后尝试把 CoreAccessories 的连接级认证标志置为已认证。端点 iAP2_Initialized 自填：配件识别被接受后向端点属性写入该键，看系统接受、拒绝还是忽略。属性变更回调注册：为若干 CarPlay 相关属性键注册 setHandler 回调，与委托是两条独立路径。显式 publish 连接：端点创建前单独发布连接。0x4302 StopSession 探测：0x4301 发出 7 秒后发一次停止请求，系统若有应答说明会话层存在。每次本机 CarPlay 启动还会：安装 ACC 委托探针并快照连接状态/属性/签名、尝试 kickstart carplayd、自测回连端口、抓包 70 秒、OSLogStore（本进程域，iOS 公开 API 读不到系统日志）与命令行双通道记录日志 60 秒、XPC 探测候选守护进程、12 秒后扫描崩溃报告/偏好/launchctl/进程表/关键路径、launchd 任务清单、CarPlay 框架清单、候选二进制里的 4301/CarPlay 字符串、CoreAccessories 导出类与运行时转储、plist 里全部配件相关 MachServices（命中即真实连接握手）、内核进程表（libproc，ps 命令在 iOS 不存在）、本进程 entitlements 校验、/usr/libexec 与界面插件清单、偏好目录全量 CarPlay 域、Bonjour 浏览 _carplay/_airplay/_raop 广播、同时监听 7001/7002/7100/5000/62078 捕捉系统回连；task_for_pid 枚举 iapd/backboardd/SpringBoard 已加载的镜像、共享缓存里 CarPlay 框架是否存在、CarKit/CarPlay 框架的类枚举与方法列表（会话请求类是否随 15.6 发布）与 Info.plist 元数据、内核 TCP 套接字表原始快照、7000/49152/53000 等端口占用探测、配件 Keychain 组、iapd/carkit/AccessorySettings/蓝牙偏好域、70 秒 Darwin 会话通知监听（命中即证明有代码在发起会话）。连接类型 0–5 扫描会创建并销毁临时连接，映射这份 CoreAccessories 接受哪些连接类型；连接 iAP2_Initialized 自填在认证通过后向连接级属性写入。读取失败同样写入日志。", [
             .control("本机传输类型", icon: ("cable.connector", .systemIndigo), localTransportControl),
             .control("0x1D01 仅声明 Wi-Fi 传输", icon: ("wifi", .systemBlue), localWifiOnlySwitch),
             .control("0x4301 跳过 Wi-Fi 凭据", icon: ("key.slash", .systemOrange), localSkipWifiSwitch),

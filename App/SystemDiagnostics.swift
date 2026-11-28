@@ -76,6 +76,7 @@ final class SystemDiagnostics: @unchecked Sendable {
             scanProcessTable()
             scanRemoteProcessImages()
             scanSharedCache()
+            scanFrameworkIntrospection()
             scanSocketTable()
             scanKeychainGroups()
             scanPortOccupancy([7000, 49152, 53000, 3689, 8866, 8009, 47998, 4000, 4010, 61500, 47000])
@@ -480,6 +481,12 @@ final class SystemDiagnostics: @unchecked Sendable {
         logBlock("共享缓存", DirectAccessoryTransport.sharedCacheContainment())
     }
 
+    /// CarKit/CarPlay 框架的类枚举与 Info.plist：会话请求类（CARSessionRequest* 等）
+    /// 是否随 15.6 一起发布。存在与否直接决定下一轮能不能做真实请求实验。
+    private func scanFrameworkIntrospection() {
+        logBlock("框架类", DirectAccessoryTransport.frameworkClassSummary())
+    }
+
     /// 内核 TCP 套接字表原始快照：系统里有没有进程在监听 CarPlay/RTSP 端口。
     private func scanSocketTable() {
         logBlock("套接字表", DirectAccessoryTransport.tcpSocketTableSummary())
@@ -529,7 +536,8 @@ final class SystemDiagnostics: @unchecked Sendable {
     private func scanPreferences() {
         let domains = ["com.apple.carplayd", "com.apple.carplay", "com.apple.CoreAccessories",
                        "com.apple.iapd", "com.apple.carkit", "com.apple.AccessorySettings",
-                       "com.apple.airplay"]
+                       "com.apple.airplay", "com.apple.MobileBluetooth", "com.apple.bluetoothd",
+                       "com.apple.bluetooth"]
         let scopes: [(user: CFString, scope: String, quiet: Bool)] = [
             (kCFPreferencesCurrentUser, "CurrentUser", false),
             (kCFPreferencesAnyUser, "AnyUser", true)
@@ -764,6 +772,40 @@ final class SystemDiagnostics: @unchecked Sendable {
             AppLog.record("网络抓包开始 · \(interface) · 约 \(seconds) 秒 · 过滤 \(filter)")
             run(command: "tcpdump -n -i \(interface) -c 120 \"\(filter)\" 2>&1 & TP=$!; sleep \(seconds); kill -TERM $TP 2>/dev/null",
                 maxSeconds: Double(seconds) + 6, maxLines: 120, tag: "抓包 \(interface)")
+        }
+    }
+
+    // MARK: Darwin 通知监听（会话启动广播）
+
+    /// carplayd 要启动 CarPlay 会话，通常会在系统里广播 Darwin 通知（进程间事件通道，
+    /// 不需要沙盒权限就能订阅）。名字是推测的，但订阅成本为零：一旦命中，
+    /// 就说明 15.6 里确实有代码在发起会话，再看是谁。
+    func listenDarwinNotifications(seconds: Int, completion: (() -> Void)? = nil) {
+        captureQueue.async { [self] in
+            defer { completion?() }
+            let names = ["com.apple.carplayd.sessionStarted",
+                         "com.apple.carplayd.sessionStart",
+                         "com.apple.carplayd.sessionRequested",
+                         "com.apple.carplay.sessionStarted",
+                         "com.apple.carplay.sessionStart",
+                         "com.apple.carkit.sessionStarted",
+                         "com.apple.iap2.sessionStarted",
+                         "com.apple.CoreAccessories.sessionStarted"]
+            AppLog.record("Darwin 通知监听开始 · \(seconds) 秒 · \(names.count) 个候选名（名字为推测，命中即强证据）")
+            var tokens: [(Int32, String)] = []
+            for name in names {
+                var token: Int32 = 0
+                let status = notify_register_dispatch(name, &token,
+                                                      DispatchQueue.global(qos: .utility)) { _ in
+                    AppLog.record("Darwin 通知命中 · \(name)")
+                }
+                if status == 0 { tokens.append((token, name)) } else {
+                    AppLog.record("Darwin 通知注册失败 · \(name)：状态 \(status)")
+                }
+            }
+            Thread.sleep(forTimeInterval: TimeInterval(seconds))
+            for (token, _) in tokens { notify_cancel(token) }
+            AppLog.record("Darwin 通知监听结束 · 注册成功 \(tokens.count)/\(names.count) 个名称，期间命中见上一行")
         }
     }
 

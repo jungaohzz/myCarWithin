@@ -1,5 +1,6 @@
 #import "DirectAccessoryTransport.h"
 #import <TargetConditionals.h>
+#import <dlfcn.h>
 #import <malloc/malloc.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -363,6 +364,76 @@ static NSString *ReadRemoteString(mach_port_t task, uint64_t address, size_t lim
                           contains(path.UTF8String) ? @"在共享缓存" : @"不在"]];
     dlclose(handle);
     return [lines componentsJoinedByString:@"，"];
+}
++ (NSString *)frameworkClassSummary {
+    NSMutableString *out = [NSMutableString string];
+    NSArray<NSString *> *paths = @[
+        @"/System/Library/PrivateFrameworks/CarPlay.framework/CarPlay",
+        @"/System/Library/PrivateFrameworks/CarKit.framework/CarKit",
+        @"/System/Library/PrivateFrameworks/CarPlayServices.framework/CarPlayServices",
+        @"/System/Library/PrivateFrameworks/CarPlayUIServices.framework/CarPlayUIServices",
+        @"/System/Library/PrivateFrameworks/CarAccessoryFramework.framework/CarAccessoryFramework",
+    ];
+    for (NSString *path in paths) {
+        @try {
+            void *handle = dlopen(path.UTF8String, RTLD_LAZY);
+            if (!handle) {
+                const char *reason = dlerror();
+                [out appendFormat:@"%@：dlopen 失败（%s）；", path.lastPathComponent, reason ? reason : @"?"];
+                continue;
+            }
+            unsigned int classCount = 0;
+            const char **classes = objc_copyClassNamesForImage(path.UTF8String, &classCount);
+            NSMutableArray<NSString *> *interesting = [NSMutableArray array];
+            for (unsigned int i = 0; classes && i < classCount; i++) {
+                NSString *className = @(classes[i]);
+                NSString *lower = className.lowercaseString;
+                if ([lower containsString:@"session"] || [lower containsString:@"request"]
+                    || [lower containsString:@"vehicle"] || [lower containsString:@"accessory"])
+                    [interesting addObject:className];
+            }
+            if (classes) free(classes);
+            [out appendFormat:@"%@：%u 个类，会话/请求相关 %lu 个", path.lastPathComponent,
+                classCount, (unsigned long)interesting.count];
+            if (interesting.count > 0)
+                [out appendFormat:@"（%@）",
+                    [[interesting subarrayWithRange:NSMakeRange(0, MIN(interesting.count, (NSUInteger)25))]
+                     componentsJoinedByString:@"，"]];
+            // 会话请求类的方法列表是下一步“真实验证”的签名依据，必须打出来。
+            for (NSString *className in interesting) {
+                NSString *lower = className.lowercaseString;
+                if (!([lower containsString:@"sessionrequest"] || [lower containsString:@"requestservice"]
+                      || [lower containsString:@"sessionstatus"])) continue;
+                Class cls = NSClassFromString(className);
+                if (!cls) continue;
+                unsigned int methodCount = 0;
+                Method *methods = class_copyMethodList(cls, &methodCount);
+                NSMutableArray<NSString *> *selectors = [NSMutableArray array];
+                for (unsigned int i = 0; methods && i < methodCount && i < 25; i++)
+                    [selectors addObject:NSStringFromSelector(method_getName(methods[i]))];
+                if (methods) free(methods);
+                [out appendFormat:@"｜%@ 方法：%@", className, [selectors componentsJoinedByString:@" "]];
+            }
+            [out appendString:@"；"];
+            dlclose(handle);
+        } @catch (NSException *exception) {
+            [out appendFormat:@"%@：异常 %@；", path.lastPathComponent, exception.name];
+        }
+    }
+    for (NSString *path in paths) {
+        NSString *plistPath = [path.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"Info.plist"];
+        NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+        if (![plist isKindOfClass:NSDictionary.class]) {
+            [out appendFormat:@"%@ Info.plist 不可读；", path.lastPathComponent];
+            continue;
+        }
+        [out appendFormat:@"%@ Info：id=%@ 版本=%@/%@ 键 %lu 个%@；",
+            path.lastPathComponent, plist[@"CFBundleIdentifier"] ?: @"-",
+            plist[@"CFBundleShortVersionString"] ?: @"-", plist[@"CFBundleVersion"] ?: @"-",
+            (unsigned long)plist.count,
+            plist[@"XPCService"] ? @"（含 XPCService）" : @""];
+    }
+    return out;
 }
 + (NSString *)tcpSocketTableSummary {
     size_t length = 0;

@@ -49,6 +49,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// _dyld_shared_cache_contains_path for each candidate framework path: is the
 /// code even present in the OS image, independent of whether anything runs it.
 + (NSString *)sharedCacheContainment;
+/// dlopen CarKit/CarPlay/CarPlayServices/CarPlayUIServices/CarAccessoryFramework and
+/// enumerate their classes, dumping selectors of session-request classes, plus each
+/// framework's Info.plist version and XPCService/extension entries. Answers "does
+/// iOS 15.6 ship the session-request logic carplayd would run".
++ (NSString *)frameworkClassSummary;
 /// Raw net.inet.tcp.pcblist snapshot: record count plus leading raw bytes,
 /// because socket structs differ per OS version and hex can be decoded offline.
 + (NSString *)tcpSocketTableSummary;
